@@ -1,0 +1,23 @@
+ Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Pickle / cache
+*.pkl
+*.pickle
+/cache/
+/.cache/
+
+# cfgrib index files
+*.idx
+
+# Figures / outputs
+*.png
+*.pdf
+*.jpg
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
