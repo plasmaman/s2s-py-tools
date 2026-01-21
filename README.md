@@ -11,3 +11,5 @@ Initial working version:
 - Bias correction
 
 This repository starts from a clean procedural rewrite of earlier class-based code.
+
+A validation paper for the dry-spell forecast is publshed in Climate Dynamics: https://doi.org/10.1007/s00382-025-07920-4
