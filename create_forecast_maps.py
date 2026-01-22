@@ -10,6 +10,19 @@ import netCDF4 as nc
 import re
 import calendar
 from numpy.lib.stride_tricks import sliding_window_view
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy
+import cartopy.feature as cf
+from shapely.geometry import Point
+from scipy.stats import pearsonr
+import cmcrameri.cm as cmc
+from matplotlib.colors import ListedColormap
+from matplotlib.ticker import MultipleLocator, FuncFormatter
+import matplotlib.lines as mlines
+import matplotlib.patches as mpatches
+import matplotlib.colors as mcolors
+from matplotlib.colorbar import ColorbarBase
 
 
 # ---- your constants ----
@@ -19,7 +32,8 @@ DATADIR = "/nird/datapeak/NS9873K/kolstad"
 DATALAKEDIR = "/nird/datalake/NS9853K/kolstad"
 ECMF_NATIVE_ROOT = f"{DATALAKEDIR}/ecwmf"
 CACHEROOT = f"{DATADIR}/cache/python"
-FIGDIR = f"{DATADIR}/../www/{EXPNAME}"
+#FIGDIR = f"{DATADIR}/../www/{EXPNAME}"
+FIGDIR = '/nird/home/kolstad/python/s2s-py-tools'
 HINDCAST_DIR = f"{DATADIR}/{EXPNAME}"
 ERA5_DIR = f"{DATADIR}/{EXPNAME}"
 RESOLUTION = 'native'
@@ -27,17 +41,72 @@ RESOLUTION = 'native'
 # Preferences:
 DEBUG_LEVEL = 0
 BIAS_CORRECTION_WINDOW_DAYS = 11 # Same as nbr of ensemble members in hindcast
+COASTLINEWIDTH = 0.6
+COASTLINECOLOR = 'k'
+BORDERCOLOR = 'y'
+fs = FONTSIZE = 9
+
+# Areas and country-level zooming:
+# Define these are variables instead of strings, so we can change the definition w/o changing the code
+MALAWI = 'MALAWI_3'
+EAST_AFRICA = 'EAST_AFRICA'
+EAST_AFRICA_EXT = 'EAST_AFRICA_EXT'
+EAST_AFRICA_FCST = 'EAST_AFRICA_FCST'
+EAST_AFRICA_PALMER = 'EAST_AFRICA_PALMER'
+ETHIOPIA = 'ETHIOPIA_2'
+MADA = 'MADA'
+
+# Area definitions (lat0, lat1, lon0, lon1):
+CBOXES = {
+	'MALAWI_1': [-17.5,-9,32.5,36],
+	'MALAWI_2': [-17.5,-9,32,36.5],
+	'MALAWI_3': [-19,-8,31,37.5],
+	'EAST_AFRICA': [-9,7.5,33.5,50],
+	'EAST_AFRICA_EXT': [-12,15,28,52],
+	'EAST_AFRICA_PALMER': [-5,10,30,50],
+	'EAST_AFRICA_FCST': [-26,15,28,52],
+	'ETHIOPIA_1': [3,16,32,52],
+	'ETHIOPIA_2': [2,16,32,50],
+	'MADA': [-26.5,-11,42,51.5],
+}
+
+# Some nice colours:
+C0 = '#1f77b4'
+C1 = '#ff7f0e'
+C2 = '#2ca02c'
+C3 = '#d62728'
+C4 = '#9467bd'
+C5 = '#8c564b'
+C8 = '#bcbd22'
+C9 = '#17becf'
 
 # Caching:
 CACHEDIR = f"{CACHEROOT}/{EXPNAME}/native"
 USE_CACHE = True
 _GRID_CACHE = None
 _DATA_CACHE = {}
+_ZOOM_DIC = {} # Sub-region definitions
+_BORDERS = None
 
-# optionally: savepickle(path, obj)
 
-# Global variables:
-#global_data_cache = {}
+def savefig(filename,dpi=300,filetype='png',base_path=None):
+	if base_path is None:
+		base_path = '.'
+	filename = f'{base_path}/{filename}.{filetype}'
+	debug('Saving figure:',filename, priority=1)
+	plt.savefig(filename,dpi=dpi)
+
+def country_code_to_region(cc):
+	try:
+		return {
+			'MG': MADA,
+			'ET': ETHIOPIA,
+			'MW': MALAWI,
+			'EA': EAST_AFRICA_FCST
+		}[cc]
+	except:
+		pass
+	return cc
 
 def get_prop(key, default=None, **kw):
 	"""
@@ -298,7 +367,7 @@ def collect_forecast_data_for_refdate(**kw):
 	# arr.shape = (nbr of members, nbr of days, lat, lon), e.g.: (101, 30, 125, 78)
 	arr = ds_all["tp_daily"].values 
 	result = {
-		"model_data": arr,  # keep same for now
+		"model_data": model['precip_mult']* arr,  # keep same for now
 		"valid_times": [
 			dt.astype("datetime64[ms]").astype(datetime).date()
 			for dt in ds_all["valid_time"].values
@@ -320,7 +389,6 @@ def get_grid(cache_dir=CACHEDIR):
 	global _GRID_CACHE
 	if _GRID_CACHE is not None:
 		return _GRID_CACHE
-
 	cachefile = f"{cache_dir}/grid_{RESOLUTION}"
 	try:
 		g = loadpickle(cachefile)
@@ -328,26 +396,24 @@ def get_grid(cache_dir=CACHEDIR):
 		return g
 	except Exception:
 		pass
-
 	# Build grid from the ERA5 LSM file
 	file_path = f"{DATADIR}/{EXPNAME}/era5_africa_lsm_{RESOLUTION}"
 	file_path += ".nc"
-
 	ds = nc.Dataset(file_path)
 	lon_1d = ds["longitude"][:]
 	lat_1d = ds["latitude"][:]
-	lsm = ds["lsm"][0, :, :]
+	try:
+		lsm = ds["lsm"][0, :, :]
+	except:
+		lsm = None
 	ds.close()
-
 	lon, lat = np.meshgrid(lon_1d, lat_1d)
-
 	g = {
 		"lon": lon,
 		"lat": lat,
-		"lsm": lsm,
-		"inside": {},  # fill later
+		"lsm": lsm
+		#"inside": {},  # fill later
 	}
-
 	savepickle(cachefile, g)
 	_GRID_CACHE = g
 	return g
@@ -632,6 +698,69 @@ def compute_thresholds(refdate, all_data, **kw):
 		#savepickle(cachefile, thr)
 	return thr
 
+def zoom(region = None, **kw):
+	"""Create a cutout from the full grid"""
+	if not region in _ZOOM_DIC:
+		g = get_grid(**kw)
+		if region is None:
+			bbox = (
+				np.min(g['lat'].ravel()),
+				np.max(g['lat'].ravel()),
+				np.min(g['lon'].ravel()),
+				np.max(g['lon'].ravel()),
+			)
+		else:
+			bbox = CBOXES[region]
+		J4 = np.nonzero((g['lon'][0,:]>=bbox[2])&(g['lon'][0,:]<=bbox[3]))[0]
+		I4 = np.nonzero((g['lat'][:,0]>=bbox[0])&(g['lat'][:,0]<=bbox[1]))[0]
+		K4 = np.nonzero(
+			(g['lon'].ravel()>=bbox[2])&
+			(g['lon'].ravel()<=bbox[3])&
+			(g['lat'].ravel()>=bbox[0])&
+			(g['lat'].ravel()<=bbox[1])
+		)[0]
+		ix4 = np.ix_(I4,J4)
+		lon4 = g['lon'][ix4]
+		lat4 = g['lat'][ix4]
+		try:
+			lsm4 = g['lsm'][ix4]
+		except:
+			lsm4 = None
+		asp4 = (np.max(lon4.ravel())-np.min(lon4.ravel())) / (np.max(lat4.ravel())-np.min(lat4.ravel()))
+		d = {
+			'lon': lon4,
+			'lat': lat4,
+			'lsm': lsm4,
+			'I': I4,
+			'J': J4,
+			'K': K4,
+			'ix': ix4,
+			'sz': np.prod(lon4.shape),
+			'aspect_ratio': asp4
+		}
+		d['proj'] = ccrs.PlateCarree()
+		d['extent'] = [bbox[2],bbox[3],bbox[0],bbox[1]]
+		_ZOOM_DIC[region] = d
+	return _ZOOM_DIC[region]
+
+def get_borders():
+	global _BORDERS
+	if _BORDERS is None:
+		_BORDERS = cartopy.feature.NaturalEarthFeature(category='cultural',name='admin_0_boundary_lines_land',scale='10m',facecolor='none')
+	return _BORDERS
+
+def drawborders(ax):
+	b = get_borders()
+	#b = cf.BORDERS
+	ax.add_feature(b,edgecolor=BORDERCOLOR,linewidth=COASTLINEWIDTH*2)
+	#ax.add_feature(b,edgecolor='yellow',linewidth=COASTLINEWIDTH)
+
+def drawfeatures(ax):
+	ax.add_feature(cf.COASTLINE,edgecolor='w',linewidth=COASTLINEWIDTH*1.6)
+	ax.add_feature(cf.COASTLINE,edgecolor=COASTLINECOLOR,linewidth=COASTLINEWIDTH)
+	#ax.add_feature(cf.COASTLINE,edgecolor=BORDERCOLOR,linewidth=COASTLINEWIDTH*0.75)
+	ax.add_feature(cf.LAKES,edgecolor=COASTLINECOLOR,linewidth=COASTLINEWIDTH*.75,facecolor='None')
+	drawborders(ax)
 
 def define_hits(precip_data, thr, ax=1, forecast_type=None, **kw):
 	"""
@@ -650,14 +779,79 @@ def define_hits(precip_data, thr, ax=1, forecast_type=None, **kw):
 	else:
 		raise ValueError(f"Unknown forecast type: {forecast_type}")
 	return hits
+import matplotlib.pyplot as plt
+
+def create_map_axes(z,
+			figw_inches=3.5, 
+			margin_left_inches=0.05, 
+			margin_right_inches=0.05, 
+			margin_top_inches=0.7, 
+			margin_bottom_inches=0.8,
+			dpi=150):
+	"""
+	Create a matplotlib figure and axes with specified dimensions and margins.
+	
+	Parameters
+	----------
+	z = the zoom dictionary
+	figw_inches : float
+		Figure width in inches
+	margin_left_inches : float
+		Left margin in inches
+	margin_right_inches : float
+		Right margin in inches
+	margin_top_inches : float
+		Top margin in inches
+	margin_bottom_inches : float
+		Bottom margin in inches
+	dpi : int
+		Dots per inch for the figure
+	Returns
+	-------
+	fig : matplotlib.figure.Figure
+		The created figure
+	ax : matplotlib.axes.Axes
+		The created axes
+	"""
+	aspect_ratio = z['aspect_ratio']
+	# Compute axes width
+	axes_width_inches = figw_inches - margin_left_inches - margin_right_inches	
+	# Compute axes height from aspect ratio
+	axes_height_inches = axes_width_inches / aspect_ratio	
+	# Compute figure height
+	figh_inches = axes_height_inches + margin_top_inches + margin_bottom_inches	
+	# Create figure
+	fig = plt.figure(figsize=(figw_inches, figh_inches), dpi=dpi)
+	# Add axes with the specified margins (in normalized coordinates)
+	ax = fig.add_axes([
+		margin_left_inches / figw_inches,      # left
+		margin_bottom_inches / figh_inches,    # bottom
+		axes_width_inches / figw_inches,       # width
+		axes_height_inches / figh_inches],       # height
+		projection = z['proj']
+	)
+	return fig, ax
+
 
 def make_forecast_for_refdate(force = False, testing = False, **kw):
+
 	model = kw['model']
 	refdate = kw['refdate']
 	obs_source = kw['obs_source']
 	forecast_options = kw['forecast_options']
 	lead_time_day0 = forecast_options['lead_time_day0']
-	# Create model dictionary
+
+	# Set some constants:
+	ms = 2.5
+	mew = 0.3
+	lw = 0.75
+	figw_inches = 3.5
+	DPI = 150
+	
+	# Make a list of regions for which we show maps:
+	display_regions = []
+	for region in forecast_options['regions']:
+		display_regions.append(country_code_to_region(region))
 
 	# Get the forecast data for the refdate (initial date):
 	f = collect_forecast_data_for_refdate(model=model, refdate=refdate)
@@ -736,6 +930,82 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 					'model': define_hits(fcst_data, thr[idx,:,:], forecast_type=forecast_type, dry_spell_max_length=dry_spell_max_length),
 					'clim': define_hits(all_obsdata, precip_mm, forecast_type=forecast_type, dry_spell_max_length=dry_spell_max_length)
 				}
+				for key in ['model','clim','diff']:
+					for dregion in display_regions:
+						z = zoom(dregion)
+						if key in ['model','clim']:
+							a = np.mean(hits[key], axis=0)[np.ix_(z['I'],z['J'])]
+							cv = np.arange(0,1.1,.1)  
+							cmap = plt.get_cmap('Reds',len(cv)-1)
+							extend = 'neither'
+							#ticks = (cv[::2] if not vbar else cv)
+						else: 
+							a = np.mean(hits['model'], axis=0)[np.ix_(z['I'],z['J'])] - np.mean(hits['clim'], axis=0)[np.ix_(z['I'],z['J'])]
+							cv = np.arange(-.5,0.51,.1)
+							cmap = plt.get_cmap('RdBu_r',len(cv)+1)
+							cmap = ListedColormap(cmap(np.linspace(0, 1, len(cv)+1))[1:-1])
+							extend = 'both'
+							#ticks = (cv[1:-1:2] if not vbar else cv[1:-1])
+						cmap.set_bad(color='.7')
+						dpi = 150
+						figw_inches = 3.5
+						margin_left_inches = 0.15
+						margin_right_inches = 0.15
+						margin_top_inches = 0.6
+						margin_bottom_inches = 0.5
+						# Compute axes width
+						axes_width_inches = figw_inches - margin_left_inches - margin_right_inches	
+						# Compute axes height from aspect ratio
+						axes_height_inches = axes_width_inches / z['aspect_ratio']	
+						# Compute figure height
+						figh_inches = axes_height_inches + margin_top_inches + margin_bottom_inches	
+						# Create figure
+						fig = plt.figure(figsize=(figw_inches, figh_inches), dpi=dpi)
+						# Add axes with the specified margins (in normalized coordinates)
+						ax = fig.add_axes([
+							margin_left_inches / figw_inches,      # left
+							margin_bottom_inches / figh_inches,    # bottom
+							axes_width_inches / figw_inches,       # width
+							axes_height_inches / figh_inches],       # height
+							projection = z['proj']
+						)
+						#ax = fig.subplot(0, proj=z['proj'])
+						ax.set_aspect('auto')
+						ax.add_feature(cf.COASTLINE,edgecolor='k',linewidth=lw)
+						ax.add_feature(cf.LAKES,edgecolor='k',linewidth=lw,facecolor='None')
+						borders = get_borders()
+						a[bad[np.ix_(z['I'],z['J'])]] = np.nan
+						data = ax.pcolormesh(z['lon'],z['lat'],a,cmap=cmap,vmin=cv[0],vmax=cv[-1],shading='auto',transform=ccrs.PlateCarree())
+						srcdesc = {'model': 'ECMWF', 'clim': 'Climatology', 'diff': 'ECMWF$-$Climatology'}[key]
+						ax.add_feature(borders,edgecolor='y',linewidth=lw)
+						t = f'Dry Spell Forecast ({srcdesc})'
+						t += '\nInitial Date: %s'%(refdate.strftime('%d %B, %Y'))
+						t += '\nForecast Period: %s to %s'%(
+							(refdate+timedelta(days=lead_time_day0-1)).strftime('%d %b'),
+							(refdate+timedelta(days=lead_time_day1-1)).strftime('%d %b')
+						)
+						t += '\nNo Rain Threshold: %s mm per day'%(precip_mm)
+						plt.title(t, fontsize=fs-1)
+						cbar_padding_inches = 0.05  # padding between axes and colorbar
+						pad = cbar_padding_inches / figh_inches
+						# cbar = plt.colorbar(data, cax=ax, orientation='horizontal', 
+                  #   pad=pad, aspect=30)
+						cbar_height_inches = 0.2  # height of colorbar
+						cbar_bottom_inches = margin_bottom_inches - cbar_height_inches - cbar_padding_inches # space from bottom of figure
+						cbar_ax = fig.add_axes([
+							margin_left_inches / figw_inches,                    # same left as main axes
+							cbar_bottom_inches / figh_inches,                    # bottom position
+							axes_width_inches / figw_inches,                     # same width as main axes
+							cbar_height_inches / figh_inches                     # colorbar height
+						])
+						# Create colorbar
+						#cbar = plt.colorbar(data, cax=cbar_ax, orientation='horizontal', pad=0)
+						cbar = ColorbarBase(cbar_ax, cmap=cmap, 
+								norm=data.norm,
+								orientation='horizontal')
+						cbar_ax.tick_params(labelsize=fs-1)
+						filename = f"{key}_{precip_mm}_{i}_{dregion}"
+						savefig(filename, base_path = FIGDIR)
 
 def test():
 		
@@ -756,4 +1026,5 @@ def test():
 	)
 
 if __name__ == "__main__":
-	 test()
+	test()
+	#plt.show()
