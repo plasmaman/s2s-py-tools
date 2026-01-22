@@ -846,7 +846,16 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 	mew = 0.3
 	lw = 0.75
 	figw_inches = 3.5
-	DPI = 150
+	dpi = 150
+	margin_left_inches = 0.15
+	margin_right_inches = 0.15
+	margin_top_inches = 0.6
+	margin_bottom_inches = 0.5
+	# Compute axes width
+	axes_width_inches = figw_inches - margin_left_inches - margin_right_inches	
+	cbar_padding_inches = 0.05  # padding between axes and colorbar
+	cbar_height_inches = 0.2  # height of colorbar
+	cbar_bottom_inches = margin_bottom_inches - cbar_height_inches - cbar_padding_inches # space from bottom of figure
 	
 	# Make a list of regions for which we show maps:
 	display_regions = []
@@ -947,14 +956,6 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 							extend = 'both'
 							#ticks = (cv[1:-1:2] if not vbar else cv[1:-1])
 						cmap.set_bad(color='.7')
-						dpi = 150
-						figw_inches = 3.5
-						margin_left_inches = 0.15
-						margin_right_inches = 0.15
-						margin_top_inches = 0.6
-						margin_bottom_inches = 0.5
-						# Compute axes width
-						axes_width_inches = figw_inches - margin_left_inches - margin_right_inches	
 						# Compute axes height from aspect ratio
 						axes_height_inches = axes_width_inches / z['aspect_ratio']	
 						# Compute figure height
@@ -969,7 +970,6 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 							axes_height_inches / figh_inches],       # height
 							projection = z['proj']
 						)
-						#ax = fig.subplot(0, proj=z['proj'])
 						ax.set_aspect('auto')
 						ax.add_feature(cf.COASTLINE,edgecolor='k',linewidth=lw)
 						ax.add_feature(cf.LAKES,edgecolor='k',linewidth=lw,facecolor='None')
@@ -986,12 +986,6 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 						)
 						t += '\nNo Rain Threshold: %s mm per day'%(precip_mm)
 						plt.title(t, fontsize=fs-1)
-						cbar_padding_inches = 0.05  # padding between axes and colorbar
-						pad = cbar_padding_inches / figh_inches
-						# cbar = plt.colorbar(data, cax=ax, orientation='horizontal', 
-                  #   pad=pad, aspect=30)
-						cbar_height_inches = 0.2  # height of colorbar
-						cbar_bottom_inches = margin_bottom_inches - cbar_height_inches - cbar_padding_inches # space from bottom of figure
 						cbar_ax = fig.add_axes([
 							margin_left_inches / figw_inches,                    # same left as main axes
 							cbar_bottom_inches / figh_inches,                    # bottom position
@@ -999,7 +993,6 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 							cbar_height_inches / figh_inches                     # colorbar height
 						])
 						# Create colorbar
-						#cbar = plt.colorbar(data, cax=cbar_ax, orientation='horizontal', pad=0)
 						cbar = ColorbarBase(cbar_ax, cmap=cmap, 
 								norm=data.norm,
 								orientation='horizontal')
