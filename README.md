@@ -13,5 +13,6 @@ Initial working version:
 
 ## Things to do
 - Make code more flexible with respect to grid so the observational data don't have to be on the same grid as the forecast data; Erik has code for this that could be included
+- Include support for different forecast formats, especially those downloaded in GRIB format from the ECMWF MARS archive
 - Tweak the code so it could also be used for wet spells or extreme rainfall
 - Include code for making different kinds of maps, and/or tables
