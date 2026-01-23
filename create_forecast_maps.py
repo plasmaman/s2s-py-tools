@@ -29,8 +29,8 @@ from matplotlib.colorbar import ColorbarBase
 EXPNAME = "africa"
 HOMEDIR = "/nird/home/kolstad"
 DATADIR = "/nird/datapeak/NS9873K/kolstad"
-DATALAKEDIR = "/nird/datalake/NS9853K/kolstad"
-ECMF_NATIVE_ROOT = f"{DATALAKEDIR}/ecwmf"
+ECMF_FORECAST_FILE_WILDCARD = f"/nird/datalake/NS9853K/kolstad/ecwmf/A1F%m%d*1"
+#ECMF_FORECAST_FILE_WILDCARD = f"/nird/datalake/NS9853K/users/rondro/DATA/IFS_example/ECMWFupload/mal_a1_ifs-subs_od_eefo_*_%Y%m%d*"
 CACHEROOT = f"{DATADIR}/cache/python"
 #FIGDIR = f"{DATADIR}/../www/{EXPNAME}"
 FIGDIR = '/nird/home/kolstad/python/s2s-py-tools'
@@ -169,7 +169,7 @@ def era5_new(*,
 	return dic
 
 def ecmf_native_new(*, 
-	fcst_dir=ECMF_NATIVE_ROOT, 
+	#fcst_dir=ECMF_NATIVE_ROOT, 
 	hcst_dir=HINDCAST_DIR, 
 	variable_name="tp", 
 	cache_dir=CACHEDIR, 
@@ -180,7 +180,7 @@ def ecmf_native_new(*,
 ):
 	dic = {
 		"model_name": "ecmf",
-		"fcst_dir": fcst_dir,       
+		#"fcst_dir": fcst_dir,       
 		"hcst_dir": hcst_dir,       
 		"variable_name": variable_name,
 		"first_lead_time": int(first_lead_time),
@@ -191,21 +191,6 @@ def ecmf_native_new(*,
 	}
 	#global_data_cache[dic] = {}
 	return dic
-
-def open_group_once(grib_path, group, idx_path=None):
-	"""
-	Open one cfgrib 'filter_by_keys' group from a file.
-	group: 'cf' or 'pf' (as in your original code)
-	idx_path: path to cfgrib index file (optional)
-	"""
-	backend_kwargs = {
-		"filter_by_keys": {"dataType": group},
-	}
-	if idx_path is not None:
-		backend_kwargs["indexpath"] = str(idx_path)
-
-	return xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs=backend_kwargs)
-
 
 def ensure_valid_time(ds):
 	"""
@@ -245,136 +230,141 @@ def ensure_valid_time(ds):
 	raise ValueError("Cannot construct valid_time: missing time/step coordinates.")
 
 def load_cf_pf(pattern):
-	# Return CF and PF datasets with cumulative data, stacked over valid_time.
+	"""
+	Auto-detect file structure and load cf/pf data accordingly.
+	"""
+
 	files = sorted(glob(pattern))
-	cf_parts, pf_parts = [], []
+	if not files:
+		raise RuntimeError(f"No files found matching pattern: {pattern}")
+		#return None, []
 
-	for f in files:
-		idx = f"{Path(f).with_suffix('').as_posix()}.idx"
-		try:
-			ds_cf = open_group_once(f, "cf", idx)
-			ds_cf = ensure_valid_time(ds_cf)
-			cf_parts.append(ds_cf)
-		except Exception:
-			pass
-
-		try:
-			ds_pf = open_group_once(f, "pf", idx)
-			ds_pf = ensure_valid_time(ds_pf)
-			pf_parts.append(ds_pf)
-		except Exception:
-			pass
-
-	if not cf_parts and not pf_parts:
-		raise RuntimeError("No cf/pf groups found in files.")
+	keys = ['cf','pf']
 	
-	ds_cf_all = (
-		xr.concat(
-			cf_parts,
-			dim="valid_time",
-			data_vars="minimal",
-			coords="minimal",
-			compat="override",
-			join="override",
-			combine_attrs="override",
-		).sortby("valid_time")
-		if cf_parts
-		else None
-	)
-
-	ds_pf_all = (
-		xr.concat(
-			pf_parts,
-			dim="valid_time",
-			data_vars="minimal",
-			coords="minimal",
-			compat="override",
-			join="override",
-			combine_attrs="override",
-		).sortby("valid_time")
-		if pf_parts
-		else None
-	)
-
-	return ds_cf_all, ds_pf_all
-
-def merge_cf_pf_along_number(model, ds_cf, ds_pf):
-	if ds_cf is not None and ds_pf is not None:
-		common_vt = np.intersect1d(ds_cf["valid_time"].values, ds_pf["valid_time"].values)
-		if common_vt.size == 0:
-			raise ValueError("No overlapping valid_time between cf and pf.")
-		ds_cf = ds_cf.sel(valid_time=common_vt)
-		ds_pf = ds_pf.sel(valid_time=common_vt)
-
-	if ds_cf is not None:
-		ds_cf = ds_cf.expand_dims(number=[0])
-
-	if ds_pf is not None and "number" in ds_pf.dims:
-		ds_pf = ds_pf.assign_coords(number=(ds_pf["number"] + 1))
-
-	if ds_cf is not None and ds_pf is not None:
-		ds_all = xr.concat(
-			[ds_cf, ds_pf],
-			dim="number",
-			data_vars="minimal",
-			coords="minimal",
-			compat="equals",
-			join="override",
-			combine_attrs="override",
-		)
+	# Check if any file contains 'cf' or 'pf' in the name
+	has_cf_pf_markers = any('_cf_' in f or '_pf_' in f for f in files)
+	
+	if has_cf_pf_markers:
+		file_type = 'separated'
 	else:
-		ds_all = ds_cf if ds_cf is not None else ds_pf
+		file_type = 'legacy'
+	#debug(f"Detected file structure: {file_type}")
 
-	if ds_all is None:
-		raise ValueError("Both ds_cf and ds_pf are None.")
+	if file_type == 'legacy':
+		files = sorted(glob(pattern))
+		parts = {key: [] for key in keys}
+		for f in files:
+			if '.idx' not in f:
+				for key in keys:
+					ds = xr.open_dataset(f, engine="cfgrib", filter_by_keys = {"dataType": key})
+					ds = ensure_valid_time(ds)
+					parts[key].append(ds)
 
-	var = model["variable_name"]
-	if var not in ds_all:
-		raise ValueError(f"'{var}' not found in merged dataset.")
+	elif file_type == 'separated':
+		files = {key: [] for key in keys}
+		for f in glob(pattern):
+			for key in keys:
+				# Ignore index files
+				if key in f and '.idx' not in f:
+					files[key].append(f)
+		parts = {}
+		for key in keys:
+			files[key] = sorted(files[key])
+			if not files[key]:
+				raise RuntimeError(f"No {key} files found....")
+			parts[key] = []
+			for f in files[key]:
+				ds = xr.open_dataset(f, engine="cfgrib")
+				ds = ensure_valid_time(ds)
+				parts[key].append(ds)
 
-	n_vt = ds_all.sizes["valid_time"]
+	else:
+		raise ValueError(f"Unknown file type: {file_type}")
+	
+	for key in keys:
+		if not parts[key]:
+			raise RuntimeError(f"No {key} groups found in files.")
+		
+	ds_combined = {
+		key: xr.concat(
+			parts[key],
+			dim="valid_time",
+			data_vars="minimal",
+			coords="minimal",
+			compat="override",
+			join="override",
+			combine_attrs="override",
+		).sortby("valid_time")
+		for key in keys
+	}
 
-	daily = ds_all[var].sortby("valid_time").diff("valid_time")
-	ds_all = ds_all.isel(valid_time=slice(1, None))
-	ds_all = ds_all.assign(tp_daily=daily)
-
-	n_daily = ds_all["tp_daily"].sizes["valid_time"]
-	if n_daily != n_vt - 1:
-		raise AssertionError(f"Expected tp_daily times = valid_time-1, got {n_daily} vs {n_vt}")
-
-	return ds_all
-
+	common_vt = np.intersect1d(ds_combined['cf']["valid_time"].values, ds_combined['pf']["valid_time"].values)
+	if common_vt.size == 0:
+		raise ValueError("No overlapping valid_time between cf and pf.")
+	ds_combined = {key: ds_combined[key].sel(valid_time=common_vt) for key in ds_combined.keys()}
+	# Concat along the number dimension:
+	ds_cf = ds_combined['cf'].expand_dims(number=[0])
+	ds_pf = ds_combined['pf'].assign_coords(number=(ds_combined['pf']["number"] + 1))
+	ds_merged = xr.concat(
+		[ds_cf, ds_pf],
+		dim="number",
+		data_vars="minimal",
+		coords="minimal",
+		compat="equals",
+		join="override",
+		combine_attrs="override",
+	)
+	return ds_merged
 
 def collect_forecast_data_for_refdate(**kw):
 	model = kw['model']
 	refdate = kw['refdate']
 	os.makedirs(model["cache_dir"], exist_ok=True)
 	cachefile = f'{model["cache_dir"]}/fcst_data_for_refdate_{refdate.strftime("%Y%m%d")}_native'
-	# memory cache
-#  if cachefile in model["data_cache"]:
-#      return model["data_cache"][cachefile]
+	
 	# disk cache (optional)
 	try:
 		result = loadpickle(cachefile)
-		#model["data_cache"][cachefile] = result
 		return result
 	except Exception:
 		pass
+	
 	init_tag = refdate.strftime("%m%d")
-	pattern = f'{model["fcst_dir"]}/A1F{init_tag}*1'
-	ds_cf, ds_pf = load_cf_pf(pattern)
-	ds_all = merge_cf_pf_along_number(model, ds_cf, ds_pf)
+	#pattern = f'{model["fcst_dir"]}/{ECMF_NATIVE_FILE_PREFIX}*{init_tag}*'
+	pattern = refdate.strftime(ECMF_FORECAST_FILE_WILDCARD)
+	#print(pattern)
+	#sys.exit()
+
+	# This does a lot of things with the files
+	ds_merged = load_cf_pf(pattern)
+
+	# Check that we have the variable
+	var = model["variable_name"]
+	if var not in ds_merged:
+		raise ValueError(f"'{var}' not found in merged dataset.")
+	n_vt = ds_merged.sizes["valid_time"]
+	# Compute accumulated daily rainfall by subtracting the day before
+	daily = ds_merged[var].sortby("valid_time").diff("valid_time")
+	ds_merged = ds_merged.isel(valid_time=slice(1, None))
+	ds_merged = ds_merged.assign(tp_daily=daily)
+	# Check that the number of valid times is consistent
+	n_daily = ds_merged["tp_daily"].sizes["valid_time"]
+	if n_daily != n_vt - 1:
+		raise AssertionError(f"Expected tp_daily times = valid_time-1, got {n_daily} vs {n_vt}")
+	#print(ds_merged)
+	#sys.exit()
+	
 	# arr.shape = (nbr of members, nbr of days, lat, lon), e.g.: (101, 30, 125, 78)
-	arr = ds_all["tp_daily"].values 
+	arr = ds_merged["tp_daily"].values 
 	result = {
-		"model_data": model['precip_mult']* arr,  # keep same for now
+		"model_data": model['precip_mult'] * arr,
 		"valid_times": [
 			dt.astype("datetime64[ms]").astype(datetime).date()
-			for dt in ds_all["valid_time"].values
+			for dt in ds_merged["valid_time"].values
 		],
 	}
+	
 	# optional: savepickle(cachefile, result)
-	#model["data_cache"][cachefile] = result
 	return result
 
 def get_grid(cache_dir=CACHEDIR):
@@ -1013,7 +1003,8 @@ def test():
 	}
 	make_forecast_for_refdate(
 		model = ecmf_native_new(),
-		refdate = (datetime.today() - timedelta(days=2)).date(),
+		#refdate = (datetime.today() - timedelta(days=2)).date(),
+		refdate = datetime(2026,1,21).date(),
 		obs_source = era5_new(),
 		forecast_options = forecast_options
 	)
