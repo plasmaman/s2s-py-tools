@@ -1,4 +1,4 @@
-from pyexpat import model
+#from pyexpat import model
 import os, sys
 import numpy as np
 import xarray as xr
@@ -27,38 +27,6 @@ from matplotlib.colorbar import ColorbarBase
 import itertools
 from typing import Dict, Any, Callable
 
-# Define forecast type specifications
-FORECAST_SPECS = {
-	'dry_spells': {
-		'threshold_param': 'no_rain_thresholds',
-		'auxiliary_params': ['consecutive_days', 'threshold_type'],
-		'hits_kwargs': lambda threshold, aux: {
-			'forecast_type': 'dry_spells',
-			'consecutive_days': aux['consecutive_days'],
-			'threshold_type': aux['threshold_type']
-		}
-	},
-	# Not implemented yet:
-	# 'accumulated_rainfall': {
-	# 	'threshold_param': 'accumulated_rainfall_thresholds',
-	# 	'auxiliary_params': ['accumulation_days'],
-	# 	'hits_kwargs': lambda threshold, aux: {
-	# 		'forecast_type': 'accumulated_rainfall',
-	# 		'accumulation_days': aux['accumulation_days']
-	# 	}
-	# },
-	'heavy_rainfall_days': {
-		'threshold_param': 'daily_rainfall_thresholds',
-		'auxiliary_params': ['consecutive_days', 'threshold_type'],
-		'hits_kwargs': lambda threshold, aux: {
-			'forecast_type': 'heavy_rainfall_days',
-			'consecutive_days': aux['consecutive_days'],
-			'threshold_type': aux['threshold_type']
-		}
-	}
-}
-
-
 # ---- your constants ----
 EXPNAME = "africa"
 HOMEDIR = "/nird/home/kolstad"
@@ -75,7 +43,8 @@ RESOLUTION = 'native'
 # Preferences:
 DEBUG_LEVEL = 0
 BIAS_CORRECTION_WINDOW_DAYS = 11 # Same as nbr of ensemble members in hindcast
-PERCENTILE_WINDOW_DAYS = {'model': 3, 'clim': 33} # Increase sample size for computing extreme thresholds
+# Increase sample size for computing extreme thresholds: 11 times as many for clim = nbr. of ensemble members
+PERCENTILE_WINDOW_DAYS = {'model': 3, 'clim': 33}
 COASTLINEWIDTH = 0.6
 COASTLINECOLOR = 'k'
 BORDERCOLOR = 'y'
@@ -123,6 +92,36 @@ _DATA_CACHE = {}
 _ZOOM_DIC = {} # Sub-region definitions
 _BORDERS = None
 
+# Define forecast type specifications
+FORECAST_SPECS = {
+	'dry_spells': {
+		'threshold_param': 'no_rain_thresholds',
+		'auxiliary_params': ['consecutive_days', 'threshold_type'],
+		'hits_kwargs': lambda threshold, aux: {
+			'forecast_type': 'dry_spells',
+			'consecutive_days': aux['consecutive_days'],
+			'threshold_type': aux['threshold_type']
+		}
+	},
+	# Not implemented yet:
+	# 'accumulated_rainfall': {
+	# 	'threshold_param': 'accumulated_rainfall_thresholds',
+	# 	'auxiliary_params': ['accumulation_days'],
+	# 	'hits_kwargs': lambda threshold, aux: {
+	# 		'forecast_type': 'accumulated_rainfall',
+	# 		'accumulation_days': aux['accumulation_days']
+	# 	}
+	# },
+	'heavy_rainfall_days': {
+		'threshold_param': 'daily_rainfall_thresholds',
+		'auxiliary_params': ['consecutive_days', 'threshold_type'],
+		'hits_kwargs': lambda threshold, aux: {
+			'forecast_type': 'heavy_rainfall_days',
+			'consecutive_days': aux['consecutive_days'],
+			'threshold_type': aux['threshold_type']
+		}
+	}
+}
 
 def savefig(filename,dpi=300,filetype='png',base_path=None):
 	if base_path is None:
