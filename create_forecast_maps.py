@@ -1,3 +1,4 @@
+from pyexpat import model
 import os, sys
 import numpy as np
 import xarray as xr
@@ -23,6 +24,39 @@ import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
 from matplotlib.colorbar import ColorbarBase
+import itertools
+from typing import Dict, Any, Callable
+
+# Define forecast type specifications
+FORECAST_SPECS = {
+	'dry_spells': {
+		'threshold_param': 'no_rain_thresholds',
+		'auxiliary_params': ['consecutive_days', 'threshold_type'],
+		'hits_kwargs': lambda threshold, aux: {
+			'forecast_type': 'dry_spells',
+			'consecutive_days': aux['consecutive_days'],
+			'threshold_type': aux['threshold_type']
+		}
+	},
+	# Not implemented yet:
+	# 'accumulated_rainfall': {
+	# 	'threshold_param': 'accumulated_rainfall_thresholds',
+	# 	'auxiliary_params': ['accumulation_days'],
+	# 	'hits_kwargs': lambda threshold, aux: {
+	# 		'forecast_type': 'accumulated_rainfall',
+	# 		'accumulation_days': aux['accumulation_days']
+	# 	}
+	# },
+	'heavy_rainfall_days': {
+		'threshold_param': 'daily_rainfall_thresholds',
+		'auxiliary_params': ['consecutive_days', 'threshold_type'],
+		'hits_kwargs': lambda threshold, aux: {
+			'forecast_type': 'heavy_rainfall_days',
+			'consecutive_days': aux['consecutive_days'],
+			'threshold_type': aux['threshold_type']
+		}
+	}
+}
 
 
 # ---- your constants ----
@@ -41,6 +75,7 @@ RESOLUTION = 'native'
 # Preferences:
 DEBUG_LEVEL = 0
 BIAS_CORRECTION_WINDOW_DAYS = 11 # Same as nbr of ensemble members in hindcast
+PERCENTILE_WINDOW_DAYS = {'model': 3, 'clim': 33} # Increase sample size for computing extreme thresholds
 COASTLINEWIDTH = 0.6
 COASTLINECOLOR = 'k'
 BORDERCOLOR = 'y'
@@ -688,6 +723,57 @@ def compute_thresholds(refdate, all_data, **kw):
 		#savepickle(cachefile, thr)
 	return thr
 
+def compute_percentile_thresholds(refdate, all_data, key, percentile=None, **kw):
+	window_days = PERCENTILE_WINDOW_DAYS[key]
+	init_times = sorted(all_data.keys())
+	debug(f'Computing percentile-based thresholds for {key}:', refdate)
+	# Make a new data array by combining all initial times for this refdate:
+	key2 = ('obs_data' if key=='clim' else 'model_data')
+	# Insert empty dimension to make this compatible
+	if key=='clim':
+		obsdata_padded = None
+		n = int((window_days-1)/2)
+		for j, it in enumerate(init_times):
+			vtvec = all_data[it]['valid_times']
+			vtvec_padded = [vtvec[0] + timedelta(hours = 24*i) for i in range(-n,0)]
+			a = [get_daily_precip(vt.year, vt.month, vt.day, **kw) for vt in vtvec_padded]
+			a += all_data[it][key2]
+			vtvec_padded = [vtvec[-1] + timedelta(hours = 24*i) for i in range(1,n+1)]
+			a += [get_daily_precip(vt.year, vt.month, vt.day, **kw) for vt in vtvec_padded]
+			if obsdata_padded is None:
+				obsdata_padded = np.empty([len(init_times), len(a)] + list(a[0].shape))
+			obsdata_padded[j] = np.array(a)
+		# We now similarly combine the observational data
+		# Use sliding_window_view to create overlapping windows along axis=1
+		data = sliding_window_view(obsdata_padded, window_shape=(window_days,), axis=1)
+		#print(data.shape)
+		data = np.moveaxis(data,-1,1)
+		#print(data.shape)
+		data = data.reshape([np.prod(data.shape[:2])] + list(data.shape[2:]))
+		thr = np.percentile(data, percentile, axis=0)
+	else:
+		data = np.array([all_data[it][key2] for it in init_times])
+		#debug(data['model'].shape)
+		n_years, n_members, n_lead_times, n_lat, n_lon = data.shape
+		windows = sliding_window_view(data, window_shape=window_days, axis=2)
+		#n_years, n_members, n_lead_times, n_lat, n_lon, window_days
+		#print('windows.shape:',windows.shape)
+		data = np.moveaxis(windows,-1,0)
+		#print('data.shape:',data.shape)
+		windows_reshaped = data.reshape([np.prod(data.shape[:3])] + list(data.shape[3:]))
+		#print('windows_reshaped.shape:',windows_reshaped.shape)
+		thr_windows = np.percentile(windows_reshaped, percentile, axis=0)
+		print('thr_windows.shape:',thr_windows.shape)
+		# Pad to get full lead_time dimension
+		# For early indices, use first window; for late indices, use last window
+		pad_before = window_days // 2
+		pad_after = n_lead_times - thr_windows.shape[0] - pad_before
+		thr = np.pad(thr_windows, ((pad_before, pad_after), (0, 0), (0, 0)), 
+						mode='edge')
+	debug(thr.shape, np.mean(thr.ravel()))
+	#sys.exit()			
+	return thr
+
 def zoom(region = None, **kw):
 	"""Create a cutout from the full grid"""
 	if not region in _ZOOM_DIC:
@@ -752,20 +838,78 @@ def drawfeatures(ax):
 	ax.add_feature(cf.LAKES,edgecolor=COASTLINECOLOR,linewidth=COASTLINEWIDTH*.75,facecolor='None')
 	drawborders(ax)
 
+def define_hits_prob(forecast_period_days, percentile, forecast_type=None, **kw):
+	if forecast_type in ['dry_spells','heavy_rainfall_days']:
+		consecutive_days = kw['consecutive_days']
+		if forecast_type in ['dry_spells']:
+			p_daily = percentile / 100.
+		elif forecast_type in ['heavy_rainfall_days']:
+			p_daily = (100-percentile) / 100.
+		# P(all days wet in window) for one window
+		p_window = p_daily ** consecutive_days
+		# Number of possible windows
+		n_windows = forecast_period_days - consecutive_days + 1
+		# P(at least one window has wet spell)
+		prob = 1 - (1 - p_window) ** n_windows
+		print(f"percentile: {percentile}")
+		print(f"consecutive_days: {consecutive_days}")
+		print(f"p_daily: {p_daily}")
+		print(f"p_window: {p_window}")
+		print(f"n_windows: {n_windows}")
+		return prob
+	raise ValueError(f"Unknown forecast type: {forecast_type}")
+
 def define_hits(precip_data, thr, ax=1, forecast_type=None, **kw):
 	"""
 	This function is key, as it computes whether a criterion is met.
 	precip_data is either model data or obs data
 	thr is the threshold, either a scalar or an array with dimensions (day, lat, lon)
 		-> thr is computed for each day
-	For the forecast type "dry_spells", it checks precip_data for whether there are any dry_spells of length "dry_spell_max_length"
+	For the forecast type "dry_spells", it checks precip_data for whether there are any dry_spells of length "consecutive_days"
 	"""
 	if forecast_type == 'dry_spells':
-		dry_spell_max_length = kw['dry_spell_max_length']
+		consecutive_days = kw['consecutive_days']
 		rain_below_threshold = precip_data < thr
-		windows = sliding_window_view(rain_below_threshold, window_shape=dry_spell_max_length, axis=ax)
+		windows = sliding_window_view(rain_below_threshold, window_shape=consecutive_days, axis=ax)
 		dry_spells = np.all(windows, axis=-1)
 		hits = (np.any(dry_spells, axis=ax)).astype(int)
+	elif forecast_type == 'heavy_rainfall_days':
+		consecutive_days = kw['consecutive_days']
+		rain_above_threshold = precip_data > thr
+		windows = sliding_window_view(rain_above_threshold, window_shape=consecutive_days, axis=ax)
+		wet_spells = np.all(windows, axis=-1)
+		hits = (np.any(wet_spells, axis=ax)).astype(int)
+	elif forecast_type == 'accumulated_rainfall':
+		# # Accumulated rainfall forecast
+		# forecast_options_rainfall = {
+		# 	'forecast_type': 'accumulated_rainfall',
+		# 	'rainfall_thresholds': [50],
+		# 	'accumulation_days': [2],
+		# 	'lead_time_day0': 2,
+		# 	'forecast_periods_days': [14],
+		# 	'regions': ['EA']
+		# }
+		# Accumulated rainfall forecast
+		# Check if any N-day accumulation exceeds threshold
+		accumulation_days = kw['accumulation_days']
+		# Create sliding windows of N consecutive days
+		windows = sliding_window_view(precip_data, window_shape=accumulation_days, axis=ax)
+		# Sum rainfall over each N-day window
+		accumulated = np.sum(windows, axis=-1)
+		# Check if any window exceeds threshold
+		# thr can be a scalar or array - if array, need to handle differently
+		if np.isscalar(thr):
+			exceeds_threshold = accumulated > thr
+		else:
+			# If thr varies by day, we need to compare against appropriate threshold
+			# For accumulated rainfall, use the threshold from the first day of each window
+			# This assumes thr has shape matching the sliding windows
+			if thr.ndim > 1:
+				# Take threshold from first day of accumulation period
+				thr_for_windows = thr[:accumulated.shape[ax]] if ax == 0 else thr
+			exceeds_threshold = accumulated > thr
+		# Check if ANY accumulation period exceeds threshold
+		hits = (np.any(exceeds_threshold, axis=ax)).astype(int)
 	else:
 		raise ValueError(f"Unknown forecast type: {forecast_type}")
 	return hits
@@ -823,13 +967,43 @@ def create_map_axes(z,
 	return fig, ax
 
 
-def make_forecast_for_refdate(force = False, testing = False, **kw):
+def make_forecast_for_refdate(forecast_options, **kw):
+	"""
+	Generic forecast processor that works with any forecast type.
+	
+	Users only need to:
+	1. Set forecast_type in their options
+	2. Provide the relevant parameters (thresholds and auxiliary params)
+	"""
+    
+	forecast_type = forecast_options['forecast_type']
+	spec = FORECAST_SPECS[forecast_type]
+	
+	# Get the main threshold parameter name and values
+	threshold_param = spec['threshold_param']
+	thresholds = forecast_options[threshold_param]
+	
+	# Get auxiliary parameters (like consecutive_days, accumulation_days, etc.)
+	aux_param_names = spec['auxiliary_params']
+	aux_param_values = []
+	for param in aux_param_names:
+		if param == 'threshold_type':
+			# Default to 'absolute' if not specified
+			aux_param_values.append(forecast_options.get('threshold_type', ['absolute']))
+		else:
+			aux_param_values.append(forecast_options[param])
+
+	aux_param_values = [forecast_options[param] for param in aux_param_names]
+	
+	lead_time_day0 = forecast_options['lead_time_day0']
 
 	model = kw['model']
 	refdate = kw['refdate']
 	obs_source = kw['obs_source']
-	forecast_options = kw['forecast_options']
-	lead_time_day0 = forecast_options['lead_time_day0']
+
+	# See if we're testing  
+	testing = get_prop('testing', False, **kw)
+	force = get_prop('force', False, **kw)
 
 	# Set some constants:
 	ms = 2.5
@@ -890,21 +1064,11 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 			#sys.exit()
 		all_data[it]['obs_data'] = obs_data
 
-	forecast_type = forecast_options['forecast_type']
-	for precip_mm in forecast_options['no_rain_thresholds']:
-				
-		# This is for bias-correction using quantile mapping
-		# We must map the threshold in the obs_data to a corresponding threshold in the model_data
-		# thr contains the tresholds per day and grid point : (day, lat, lon)
-		thr = compute_thresholds(
-			closest_refdate, 
-			all_data,
-			precip_mm = precip_mm,
-			obs_source = kw['obs_source']
-		)
+	# Main processing loop - completely generic
+	for threshold in thresholds:
 
-		for i in forecast_options['forecast_periods_days']:
-			lead_time_day1 = lead_time_day0 + i - 1
+		for forecast_period in forecast_options['forecast_periods_days']:
+			lead_time_day1 = lead_time_day0 + forecast_period - 1
 			# Find the day index for this subselection:
 			it = init_times[0]
 			valid_times = all_data[it]['valid_times']
@@ -918,17 +1082,70 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 				idx.append(i)
 			#debug(lead_time_day0, lead_time_day1, idx, len(idx))
 			fcst_data = f['model_data'][:,idx,:,:]
-			all_obsdata = np.array([[all_data[it]['obs_data'][i] for i in idx] for it in init_times])
+			all_obsdata = np.array([
+				[all_data[it]['obs_data'][i] for i in idx] 
+				for it in init_times
+			])
 			bad = (all_obsdata[0,0,:,:]>999)
-			for dry_spell_max_length in forecast_options['dry_spell_lengths']:
-				# Compute a boolean for each day
-				# Is there a dry spell of the specified length within the specified period?
-				# hits['model'] has dimensions (member, lat, lon), shape e.g. (101, lat, lon)
-				# hits['clim'] has dimensions (year, lat, lon), shape e.g. (20, lat, lon)
-				hits = {
-					'model': define_hits(fcst_data, thr[idx,:,:], forecast_type=forecast_type, dry_spell_max_length=dry_spell_max_length),
-					'clim': define_hits(all_obsdata, precip_mm, forecast_type=forecast_type, dry_spell_max_length=dry_spell_max_length)
-				}
+            
+			# Loop over all combinations of auxiliary parameters
+			for aux_combo in itertools.product(*aux_param_values):
+					
+				# Create dict of auxiliary params for this iteration
+				aux_dict = dict(zip(aux_param_names, aux_combo))
+
+				# Compute thresholds based on threshold type
+				threshold_type = aux_dict.get('threshold_type')
+				#print(aux_dict, threshold_type)
+				#sys.exit()
+
+				# Get the kwargs for define_hits using the spec's function
+				hits_kwargs = spec['hits_kwargs'](threshold, aux_dict)
+		
+				if threshold_type == 'absolute':
+					# This is for bias-correction using quantile mapping
+					# We must map the threshold in the obs_data to a corresponding threshold in the model_data
+					# thr contains the tresholds per day and grid point : (day, lat, lon)
+					thr = compute_thresholds(
+						closest_refdate, 
+						all_data,
+						precip_mm=threshold,
+						obs_source=kw.get('obs_source')
+					)
+					# Compute hits
+					hits = {
+						'model': define_hits(fcst_data, thr[idx, :, :], **hits_kwargs),
+						'clim': define_hits(all_obsdata, threshold, **hits_kwargs)
+					}
+				elif threshold_type == 'percentile':
+					# No bias-correction needed, as we just compute the model-internal thresholds
+					# thr contains the tresholds per day and grid point : (day, lat, lon)
+					#h = define_hits_prob(forecast_period, threshold, **hits_kwargs)
+					#print(h)
+					thr = compute_percentile_thresholds(
+						closest_refdate, 
+						all_data,
+						'model',
+						percentile=threshold
+					)
+					# Compute hits
+					hits = {
+						'model': define_hits(fcst_data, thr[idx, :, :], **hits_kwargs),
+					}
+					thr = compute_percentile_thresholds(
+						closest_refdate, 
+						all_data,
+						'clim',
+						percentile=threshold,
+						obs_source=kw.get('obs_source')
+					)
+					hits['clim'] = define_hits(all_obsdata, thr[idx, :, :], **hits_kwargs)
+					# print(hits['model'].shape)
+					# print(np.mean(hits['model'], axis=0).ravel().mean())
+					# below_threshold = fcst_data < thr[idx, :, :]
+					# print(f"Fraction of forecast days below threshold: {below_threshold.mean()}")
+					# sys.exit()
+
 				for key in ['model','clim','diff']:
 					for dregion in display_regions:
 						z = zoom(dregion)
@@ -974,7 +1191,7 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 							(refdate+timedelta(days=lead_time_day0-1)).strftime('%d %b'),
 							(refdate+timedelta(days=lead_time_day1-1)).strftime('%d %b')
 						)
-						t += '\nNo Rain Threshold: %s mm per day'%(precip_mm)
+						t += '\nNo Rain Threshold: %s mm per day'%(threshold)
 						plt.title(t, fontsize=fs-1)
 						cbar_ax = fig.add_axes([
 							margin_left_inches / figw_inches,                    # same left as main axes
@@ -983,30 +1200,83 @@ def make_forecast_for_refdate(force = False, testing = False, **kw):
 							cbar_height_inches / figh_inches                     # colorbar height
 						])
 						# Create colorbar
-						cbar = ColorbarBase(cbar_ax, cmap=cmap, 
-								norm=data.norm,
-								orientation='horizontal')
+						cbar = ColorbarBase(cbar_ax, 
+							cmap=cmap, 
+							norm=data.norm,
+							orientation='horizontal',
+							extend=extend
+						)
 						cbar_ax.tick_params(labelsize=fs-1)
-						filename = f"{key}_{precip_mm}_{i}_{dregion}"
+						filename = f"{key}_{threshold}_{i}_{dregion}"
 						savefig(filename, base_path = FIGDIR)
 
 def test():
-		
-	# Define which forecasts to make
-	forecast_options = {
-		'forecast_type': 'dry_spells',
-		'no_rain_thresholds': [1],
-		'dry_spell_lengths': [7],
+
+	# Example configurations - users just need to edit these dictionaries:
+
+	# Heavy rainfall days forecast in millimeters
+	forecast_options_heavy_absolute = {
+		'forecast_type': 'heavy_rainfall_days',
+		'daily_rainfall_thresholds': [50],
+		'consecutive_days': [1],
+		'threshold_type': ['absolute'],
 		'lead_time_day0': 2,
 		'forecast_periods_days': [14],
 		'regions': ['EA']
 	}
+
+	# Heavy rainfall days forecast with percentile thresholds
+	forecast_options_heavy_percentile = {
+		'forecast_type': 'heavy_rainfall_days',
+		'daily_rainfall_thresholds': [95],
+		'consecutive_days': [1],
+		'threshold_type': ['percentile'],
+		'lead_time_day0': 2,
+		'forecast_periods_days': [14],
+		'regions': ['EA']
+	}
+		
+	# Dry spell forecast
+	forecast_options_dry = {
+		'forecast_type': 'dry_spells',
+		'no_rain_thresholds': [1],
+		'consecutive_days': [7],
+		'threshold_type': ['absolute'],
+		'lead_time_day0': 2,
+		'forecast_periods_days': [14],
+		'regions': ['EA']
+	}
+		
+	# Dry spell forecast
+	forecast_options_dry_percentile = {
+		'forecast_type': 'dry_spells',
+		'no_rain_thresholds': [50],
+		'consecutive_days': [7],
+		'threshold_type': ['percentile'],
+		'lead_time_day0': 2,
+		'forecast_periods_days': [14],
+		'regions': ['EA']
+	}
+
+	# # Accumulated rainfall forecast
+	# Not implemented yet
+	# forecast_options_rainfall = {
+	# 	'forecast_type': 'accumulated_rainfall',
+	# 	'accumulated_rainfall_thresholds': [50],
+	# 	'accumulation_days': [2],
+	# 	'lead_time_day0': 2,
+	# 	'forecast_periods_days': [14],
+	# 	'regions': ['EA']
+	# }
+
+	forecast_options = forecast_options_dry_percentile
+
 	make_forecast_for_refdate(
+		forecast_options,
 		model = ecmf_native_new(),
 		#refdate = (datetime.today() - timedelta(days=2)).date(),
 		refdate = datetime(2026,1,21).date(),
-		obs_source = era5_new(),
-		forecast_options = forecast_options
+		obs_source = era5_new()
 	)
 
 if __name__ == "__main__":
