@@ -912,7 +912,6 @@ def define_hits(precip_data, thr, ax=1, forecast_type=None, **kw):
 	else:
 		raise ValueError(f"Unknown forecast type: {forecast_type}")
 	return hits
-import matplotlib.pyplot as plt
 
 def create_map_axes(z,
 			figw_inches=3.5, 
