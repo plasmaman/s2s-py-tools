@@ -1,4 +1,5 @@
 #from pyexpat import model
+from settings import *
 import os, sys
 import numpy as np
 import xarray as xr
@@ -28,17 +29,6 @@ import itertools
 from typing import Dict, Any, Callable
 
 # ---- your constants ----
-EXPNAME = "africa"
-HOMEDIR = "/nird/home/kolstad"
-DATADIR = "/nird/datapeak/NS9873K/kolstad"
-ECMF_FORECAST_FILE_WILDCARD = f"/nird/datalake/NS9853K/kolstad/ecwmf/A1F%m%d*1"
-#ECMF_FORECAST_FILE_WILDCARD = f"/nird/datalake/NS9853K/users/rondro/DATA/IFS_example/ECMWFupload/mal_a1_ifs-subs_od_eefo_*_%Y%m%d*"
-CACHEROOT = f"{DATADIR}/cache/python"
-#FIGDIR = f"{DATADIR}/../www/{EXPNAME}"
-FIGDIR = '/nird/home/kolstad/python/s2s-py-tools'
-HINDCAST_DIR = f"{DATADIR}/{EXPNAME}"
-ERA5_DIR = f"{DATADIR}/{EXPNAME}"
-RESOLUTION = 'native'
 
 # Preferences:
 DEBUG_LEVEL = 0
@@ -85,7 +75,6 @@ C8 = '#bcbd22'
 C9 = '#17becf'
 
 # Caching:
-CACHEDIR = f"{CACHEROOT}/{EXPNAME}/native"
 USE_CACHE = True
 _GRID_CACHE = None
 _DATA_CACHE = {}
@@ -181,13 +170,15 @@ def savepickle(filename, a):
 		f.close()
 
 def get_data_cache_key(obs_source):
-	return f"{obs_source['model_name']}_{obs_source['resolution']}"
+	#return f"{obs_source['model_name']}_{obs_source['resolution']}"
+	return f"{obs_source['model_name']}_{obs_source['subset']}"
 
 def era5_new(*, 
 	base_dir=ERA5_DIR, 
 	variable_name="tp", 
 	cache_dir=CACHEDIR, 
-	resolution = RESOLUTION,
+	subset = SUBSET,
+	#resolution = RESOLUTION,
 	precip_mult = 1000.
 ):
 	dic = {
@@ -196,7 +187,8 @@ def era5_new(*,
 		"variable_name": variable_name,
 		"cache_dir": cache_dir,
 		"precip_mult": precip_mult,
-		"resolution": resolution
+		"subset": subset
+		#"resolution": resolution
 		#"data_cache": {},
 	}
 	#global_data_cache[dic] = {}
@@ -209,7 +201,8 @@ def ecmf_native_new(*,
 	cache_dir=CACHEDIR, 
 	first_lead_time=24, 
 	last_lead_time=720, 
-	resolution = RESOLUTION,
+	subset = SUBSET,
+	#resolution = RESOLUTION,
 	precip_mult = 1000.
 ):
 	dic = {
@@ -221,7 +214,8 @@ def ecmf_native_new(*,
 		"last_lead_time": int(last_lead_time),
 		"cache_dir": cache_dir,
 		"precip_mult": precip_mult,
-		"resolution": resolution
+		"subset": subset
+		#"resolution": resolution
 	}
 	#global_data_cache[dic] = {}
 	return dic
@@ -413,7 +407,8 @@ def get_grid(cache_dir=CACHEDIR):
 	global _GRID_CACHE
 	if _GRID_CACHE is not None:
 		return _GRID_CACHE
-	cachefile = f"{cache_dir}/grid_{RESOLUTION}"
+	#cachefile = f"{cache_dir}/grid_{RESOLUTION}"
+	cachefile = f"{cache_dir}/grid_{SUBSET}"
 	try:
 		g = loadpickle(cachefile)
 		_GRID_CACHE = g
@@ -421,8 +416,7 @@ def get_grid(cache_dir=CACHEDIR):
 	except Exception:
 		pass
 	# Build grid from the ERA5 LSM file
-	file_path = f"{DATADIR}/{EXPNAME}/era5_africa_lsm_{RESOLUTION}"
-	file_path += ".nc"
+	file_path = f"{ERA5_LSM_FILE}"
 	ds = nc.Dataset(file_path)
 	lon_1d = ds["longitude"][:]
 	lat_1d = ds["latitude"][:]
@@ -448,7 +442,8 @@ def get_all_hindcast_refdates(first_refdate=None, last_refdate=None, **kw):
 	"""
 	model = kw['model']
 	wildcard = f"{HINDCAST_DIR}/tp_*_pf"
-	wildcard += f"_{model['resolution']}.grb"
+	wildcard += f"_{model['subset']}.grb"
+	#wildcard += f"_{model['resolution']}.grb"
 	#print(wildcard)
 	files = glob(wildcard)
 	dates = []
@@ -503,7 +498,8 @@ def find_closest_hindcast_refdate(max_dist_days=7, max_dist_years=2, **kw):
 def get_hindcast_filename(**kw):
 	key = kw['refdate'].strftime('%Y-%m-%d')
 	filename = f'{HINDCAST_DIR}/tp_{key}_{kw['suffix']}'
-	filename = f'{filename}_{RESOLUTION}'
+	#filename = f'{filename}_{RESOLUTION}'
+	filename = f'{filename}_{SUBSET}'
 	filename += '.grb'
 	debug(filename, kw)
 	return filename
@@ -526,7 +522,8 @@ def collect_hindcast_data_for_refdate(**kw):
 	e = [
 		'hindcast_data_for_reftime',
 		refdate.strftime('%Y%m%d'),
-		RESOLUTION
+		SUBSET
+		#RESOLUTION
 	]
 	cachefile = f'{model["cache_dir"]}/{"_".join(e)}'
 	# try:
@@ -601,12 +598,17 @@ def process_monthly_files_era5(year, month, **kw):
 	Process a single month file and the subsequent month file if needed.
 	"""
 	obs_source = kw['obs_source']
-	resolution = obs_source['resolution']
-	file_prefix = f"{obs_source['base_dir']}/{obs_source['model_name']}_{EXPNAME}_{obs_source['variable_name']}"
-	file_current = f"{file_prefix}_{year}_{month:02d}_{resolution}.nc"
+	#resolution = obs_source['resolution']
+	subset = obs_source['subset']
+	dt = datetime(year=year, month=month, day=1).date()
+	file_current = dt.strftime(ERA5_FILE_WILDCARD)
+	#file_prefix = f"{obs_source['base_dir']}/{obs_source['model_name']}_{EXPNAME}_{obs_source['variable_name']}"
+	#file_current = f"{file_prefix}_{year}_{month:02d}_{resolution}.nc"
 	next_month = (1 if month==12 else month+1)
 	next_year = (year+1 if month==12 else year)
-	file_next = f"{file_prefix}_{next_year}_{next_month:02d}_{resolution}.nc"
+	dt = datetime(year=next_year, month=next_month, day=1).date()
+	file_next = dt.strftime(ERA5_FILE_WILDCARD)
+	#file_next = f"{file_prefix}_{next_year}_{next_month:02d}_{resolution}.nc"
 	# Read the current month's data
 	tp_current = read_nc_file(file_current)
 	# Read next month's data for last day computation
@@ -623,7 +625,8 @@ def get_daily_precip_era5(year, month, day, **kw):
 		cache = _DATA_CACHE[cache_key]
 	except:
 		_DATA_CACHE[cache_key] = cache = {}
-	key = f'{year}{month:02d}{obs_source['resolution']}'
+	#key = f'{year}{month:02d}{obs_source['resolution']}'
+	key = f'{year}{month:02d}{obs_source['subset']}'
 	if not key in cache:
 		cache[key] = process_monthly_files_era5(year, month, **kw)
 	if day > len(cache[key]):
