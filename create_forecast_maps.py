@@ -1213,15 +1213,25 @@ def make_forecast_for_refdate(forecast_options, **kw):
 	figw_inches = 3.5
 	dpi = 150
 	margin_left_inches = 0.15
-	margin_right_inches = 0.15
+	cbar_orientation = 'horizontal'  # or 'vertical'
+	if cbar_orientation == 'horizontal':
+		margin_right_inches = 0.15
+		margin_bottom_inches = 0.75
+		cbar_labelpad = 5
+	else:
+		margin_right_inches = 0.75
+		margin_bottom_inches = 0.15
+		cbar_labelpad = 7
 	margin_top_inches = 0.6
-	margin_bottom_inches = 0.5
 	# Compute axes width
 	axes_width_inches = figw_inches - margin_left_inches - margin_right_inches	
-	cbar_padding_inches = 0.05  # padding between axes and colorbar
-	cbar_height_inches = 0.2  # height of colorbar
+	cbar_padding_inches = 0.1  # padding between axes and colorbar
+	cbar_height_inches = 0.15  # height of colorbar
 	cbar_bottom_inches = margin_bottom_inches - cbar_height_inches - cbar_padding_inches # space from bottom of figure
-	
+	cbar_right_inches = axes_width_inches + margin_left_inches + cbar_padding_inches
+	cbar_width_inches = 0.1
+
+
 	# Make a list of regions for which we show maps:
 	display_regions = []
 	for region in forecast_options['regions']:
@@ -1394,20 +1404,34 @@ def make_forecast_for_refdate(forecast_options, **kw):
 						)
 						t += '\nNo Rain Threshold: %s mm per day'%(threshold)
 						plt.title(t, fontsize=fs-1)
-						cbar_ax = fig.add_axes([
-							margin_left_inches / figw_inches,                    # same left as main axes
-							cbar_bottom_inches / figh_inches,                    # bottom position
-							axes_width_inches / figw_inches,                     # same width as main axes
-							cbar_height_inches / figh_inches                     # colorbar height
-						])
-						# Create colorbar
-						cbar = ColorbarBase(cbar_ax, 
-							cmap=cmap, 
+
+						desc = ('Difference in Probability' if key=='diff' else 'Probability of dry spells')
+						if cbar_orientation == 'horizontal':
+							cbar_ax = fig.add_axes([
+								margin_left_inches / figw_inches,      # same left as main axes
+								cbar_bottom_inches / figh_inches,      # bottom position
+								axes_width_inches / figw_inches,       # same width as main axes
+								cbar_height_inches / figh_inches       # colorbar height
+							])
+						else:  # vertical
+							cbar_ax = fig.add_axes([
+								cbar_right_inches / figw_inches,       # left position (right of main axes)
+								margin_bottom_inches / figh_inches,    # same bottom as main axes
+								cbar_width_inches / figw_inches,       # colorbar width
+								axes_height_inches / figh_inches       # same height as main axes
+							])
+
+						cbar = ColorbarBase(cbar_ax,
+							cmap=cmap,
 							norm=data.norm,
-							orientation='horizontal',
+							orientation=cbar_orientation,
 							extend=extend
 						)
-						cbar_ax.tick_params(labelsize=fs-1)
+						cbar_ax.tick_params(labelsize=fs-2)
+						if cbar_orientation == 'horizontal':
+							cbar.ax.set_xlabel(desc, labelpad=cbar_labelpad, fontsize=fs-1)
+						else:
+							cbar.ax.set_ylabel(desc, labelpad=cbar_labelpad, rotation=90, va='center', fontsize=fs-1)
 
 						if forecast_type == 'dry_spells':
 							e = [
