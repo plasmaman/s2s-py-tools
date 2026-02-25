@@ -131,6 +131,18 @@ def country_code_to_region(cc):
 		pass
 	return cc
 
+def region_to_country_code(region):
+	try:
+		return {
+			MADA: 'MG',
+			ETHIOPIA: 'ET',
+			MALAWI: 'MW',
+			EAST_AFRICA_FCST: 'EA'
+		}[region]
+	except:
+		pass
+	return region
+
 def get_prop(key, default=None, **kw):
 	"""
 	Used to check the keyword dictionary kw whether a named variable is defined, 
@@ -193,6 +205,16 @@ def era5_new(*,
 	}
 	#global_data_cache[dic] = {}
 	return dic
+
+def create_model(model_name, **kw):
+	if model_name in ('ecmwf', 'ecmwf',):
+		return ecmf_native_new(**kw)
+	raise RuntimeError('Invalid model name:', model_name)
+
+def create_obs_source(obs_source_name, **kw):
+	if obs_source_name in ('era5',):
+		return era5_new(**kw)
+	raise RuntimeError('Invalid obs source name:', obs_source_name)
 
 def ecmf_native_new(*, 
 	#fcst_dir=ECMF_NATIVE_ROOT, 
@@ -332,7 +354,7 @@ def load_cf_pf(pattern):
 	ds_combined = {key: ds_combined[key].sel(valid_time=common_vt) for key in ds_combined.keys()}
 	# Concat along the number dimension:
 	ds_cf = ds_combined['cf'].expand_dims(number=[0])
-	ds_pf = ds_combined['pf'].assign_coords(number=(ds_combined['pf']["number"] + 1))
+	ds_pf = ds_combined['pf'].assign_coords(number=(ds_combined['pf']["number"]))
 	ds_merged = xr.concat(
 		[ds_cf, ds_pf],
 		dim="number",
@@ -344,6 +366,168 @@ def load_cf_pf(pattern):
 	)
 	return ds_merged
 
+def load_hindcast_cf_pf(pattern, variable, precip_mult=1.0):
+	"""
+	Load hindcast cf/pf grib files matching pattern.
+	Each file = one forecast step, containing 20 hindcast years.
+	Returns dict keyed by hdate (hindcast init date), each containing:
+		- 'model_data': np.array (number, step, lat, lon)
+		- 'valid_times': list of pd.Timestamp
+	"""
+	files = sorted([f for f in glob(pattern) if '.idx' not in f])
+	if not files:
+		raise RuntimeError(f"No files found matching: {pattern}")
+
+	parts_cf = []
+	parts_pf = []
+
+	for f in files:
+		ds_cf = xr.open_dataset(f, engine="cfgrib", filter_by_keys={"dataType": "cf"})
+		ds_pf = xr.open_dataset(f, engine="cfgrib", filter_by_keys={"dataType": "pf"})
+		parts_cf.append(ds_cf)
+		parts_pf.append(ds_pf)
+
+	# Concatenate along step dimension
+	ds_cf_all = xr.concat(parts_cf, dim="step", coords="minimal", data_vars="minimal", compat="override", join="override", combine_attrs="override")
+	ds_pf_all = xr.concat(parts_pf, dim="step", coords="minimal", data_vars="minimal", compat="override", join="override", combine_attrs="override")
+	#ds_cf_all = xr.concat(parts_cf, dim="step")
+	#ds_pf_all = xr.concat(parts_pf, dim="step")
+
+	# Combine cf and pf along number dimension (cf becomes number=0)
+	ds_cf_exp = ds_cf_all.expand_dims(number=[0])
+	ds_merged = xr.concat(
+		[ds_cf_exp, ds_pf_all],
+		dim="number",
+		data_vars="minimal",
+		coords="minimal",
+		compat="override",
+		join="override",
+		combine_attrs="override",
+	)
+	# ds_merged dims: (number=11, time=20, step=N, lat, lon)
+
+	# Build result dict keyed by hindcast init date, matching old format
+	result = {}
+	hdates = ds_merged["time"].values  # the 20 hindcast years
+	for j, hdate in enumerate(hdates):
+		da = ds_merged[variable].isel(time=j)
+		data = da.values  # shape: (number, step, lat, lon)
+
+		# Drop step=0 (accumulation starts at step 1)
+		data = data[:, 1:, :, :]
+
+		# De-accumulate
+		mdata = np.empty_like(data)
+		mdata[:, 0, :, :] = data[:, 0, :, :]
+		for step in range(1, data.shape[1]):
+			mdata[:, step, :, :] = data[:, step, :, :] - data[:, step - 1, :, :]
+
+		base = pd.Timestamp(hdate)
+		steps = ds_merged["step"].values[1:]  # also drop step=0 from valid times
+		valid_times = [base + pd.Timedelta(s) for s in steps]
+
+		result[base] = {
+			'model_data': precip_mult * mdata,
+			'valid_times': valid_times,
+		}
+
+	return result
+
+def collect_hindcast_data_for_refdate(**kw):
+	model = kw['model']
+	refdate = kw['refdate']
+
+	# os.makedirs(model["cache_dir"], exist_ok=True)
+	# cachefile = f'{model["cache_dir"]}/hcst_data_for_refdate_{refdate.strftime("%Y%m%d")}_native'
+	# try:
+	# 	return loadpickle(cachefile)
+	# except Exception:
+	# 	pass
+
+	# --- New-style: single files per step containing both cf and pf ---
+	result = None
+	for delta in [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+		dt = refdate + timedelta(days=delta)
+		pattern = dt.strftime(ECMF_HINDCAST_FILE_WILDCARD)
+		file_list = [f for f in glob(pattern) if '.idx' not in f]
+		if not file_list:
+				continue
+		result = load_hindcast_cf_pf(
+				pattern=pattern,
+				variable=model["variable_name"],
+				precip_mult=model["precip_mult"],
+		)
+		return result
+
+	# --- Old-style: separate _cf_ / _pf_ files ---
+	try:
+		cf_file = read_hindcast_file(refdate=refdate, suffix='cf', raise_on_missing=False)
+	except:
+		cf_file = None
+	try:
+		pf_file = read_hindcast_file(refdate=refdate, suffix='pf', raise_on_missing=False)
+	except:
+		pf_file = None
+
+	if cf_file is not None and pf_file is not None:
+		ensemble_ds = read_hindcast_file(refdate=refdate, suffix='pf')
+		control_ds  = read_hindcast_file(refdate=refdate, suffix='cf')
+		ensemble_precip = ensemble_ds[model["variable_name"]]
+		control_precip  = control_ds[model["variable_name"]]
+		control_precip_expanded = control_precip.expand_dims(dim='number', axis=0)
+		combined_precip = xr.concat([control_precip_expanded, ensemble_precip], dim='number')
+		init_times = control_ds['time'][:].values
+		result = {}
+		for j, init_time in enumerate(init_times):
+			first = combined_precip.isel(time=j)
+			mdata = np.empty_like(first)
+			mdata[:, 0, :, :] = first.isel(step=0)
+			for step in range(1, first.shape[1]):
+					mdata[:, step, :, :] = first.isel(step=step) - first.isel(step=step-1)
+			valid_times = [pd.Timestamp(t) for t in init_time + control_ds['step'][:].values]
+			result[pd.Timestamp(init_time)] = {
+					'model_data': model["precip_mult"] * mdata,
+					'valid_times': valid_times,
+			}
+		return result
+
+	raise RuntimeError(f"No hindcast files found for refdate {refdate} within ±5 days")
+
+	#savepickle(cachefile, result)
+
+# def collect_h_data_for_refdate(**kw):
+# 	model = kw['model']
+# 	refdate = kw['refdate']
+# 	os.makedirs(model["cache_dir"], exist_ok=True)
+# 	cachefile = f'{model["cache_dir"]}/hcst_data_for_refdate_{refdate.strftime("%Y%m%d")}_native'
+	
+# 	# disk cache (optional)
+# 	try:
+# 		raise
+# 		result = loadpickle(cachefile)
+# 		return result
+# 	except Exception:
+# 		pass
+	
+# 	for delta in [0,-1,1,-2,2,-3,3,-4,4,-5,5]:
+# 		dt = refdate + timedelta(hours=delta*24)
+# 		init_tag = dt.strftime("%m%d")
+# 		#pattern = f'{model["fcst_dir"]}/{ECMF_NATIVE_FILE_PREFIX}*{init_tag}*'
+# 		pattern = dt.strftime(ECMF_HINDCAST_FILE_WILDCARD)
+# 		file_list = sorted([f for f in glob(pattern) if '.idx' not in f])
+# 		if not file_list:
+# 			continue
+
+# 		result = load_hindcast_cf_pf(
+# 			pattern=pattern,
+# 			variable=model["variable_name"],
+# 			precip_mult=model["precip_mult"],
+# 		)
+# 		#savepickle(cachefile, result)
+# 		return result
+
+# 	raise RuntimeError(f"No hindcast files found for refdate {refdate} within ±5 days")
+		
 def collect_forecast_data_for_refdate(**kw):
 	model = kw['model']
 	refdate = kw['refdate']
@@ -473,7 +657,7 @@ def find_closest_hindcast_refdate(max_dist_days=7, max_dist_years=2, **kw):
 	:param max_dist_years: Maximum distance in years
 	"""
 	all_refdates = get_all_hindcast_refdates(period="hcst", **kw)
-	debug(all_refdates)
+	#debug(all_refdates)
 	refdate = kw['refdate']
 	refdate_start_of_year = refdate.replace(month=1, day=1)
 	refdate_day_of_year = (refdate - refdate_start_of_year).days
@@ -501,68 +685,69 @@ def get_hindcast_filename(**kw):
 	#filename = f'{filename}_{RESOLUTION}'
 	filename = f'{filename}_{SUBSET}'
 	filename += '.grb'
-	debug(filename, kw)
+	#debug(filename, kw)
 	return filename
 
 def read_hindcast_file(**kw):
 	filename = get_hindcast_filename(**kw)
 	# Open the GRIB file using xarray and the cfgrib engine
 	# This could fail, but then the exception has to be handled where read_file is called from
-	ds = xr.open_dataset(filename, engine='cfgrib')
-	return ds
+	if os.path.exists(filename):
+		return xr.open_dataset(filename, engine='cfgrib')
+	raise FileNotFoundError('File does not exist:', filename)
 
 def get_init_times_for_refdate(**kw):
 	control_ds = read_hindcast_file(suffix='cf', **kw)
 	init_times = control_ds['time'][:].values
 	return [pd.Timestamp(init_time) for init_time in sorted(init_times)]
 
-def collect_hindcast_data_for_refdate(**kw):
-	model = kw['model']
-	refdate = kw['refdate']
-	e = [
-		'hindcast_data_for_reftime',
-		refdate.strftime('%Y%m%d'),
-		SUBSET
-		#RESOLUTION
-	]
-	cachefile = f'{model["cache_dir"]}/{"_".join(e)}'
-	# try:
-	#     return data_cache[cachefile]
-	# except:
-	#     pass
-	try:
-		return loadpickle(cachefile)
-	except:
-		pass
-	# We have to read two files, control (cf) and perturbed (pf):
-	ensemble_ds = read_hindcast_file(refdate=refdate, suffix='pf')
-	control_ds = read_hindcast_file(refdate=refdate, suffix='cf')
-	ensemble_precip = ensemble_ds[model["variable_name"]]
-	control_precip = control_ds[model["variable_name"]]
-	control_precip_expanded = control_precip.expand_dims(dim='number', axis=0)
-	combined_precip = xr.concat([control_precip_expanded, ensemble_precip], dim='number')
-	init_times = control_ds['time'][:].values
-	result = {}
-	for j,init_time in enumerate(init_times):
-		first = combined_precip.isel(time=j)
-		mdata = np.empty_like(first)
-		#Context().debug(j,init_time)
-		mdata[:, 0, :, :] = first.isel(step=0)
-		for step in range(1, first.shape[1]):
-			mdata[:, step, :, :] = first.isel(step=step) - first.isel(step=step-1)
-		# The new array mdata now has 24-hour accumulated values for the first initial time
-		# with the shape (number=10, step=30, latitude=100, longitude=61)
-		# eradata = []
-		valid_times = []
-		for i, t in enumerate(init_time + control_ds['step'][:].values):
-			dt = pd.Timestamp(t)
-			valid_times.append(dt)
-		result[pd.Timestamp(init_time)] = {
-			# 'eradata': eradata,
-			'model_data': model["precip_mult"]*mdata,
-			'valid_times': valid_times
-		}
-	return result
+# def collect_hindcast_data_for_refdate(**kw):
+# 	model = kw['model']
+# 	refdate = kw['refdate']
+# 	e = [
+# 		'hindcast_data_for_reftime',
+# 		refdate.strftime('%Y%m%d'),
+# 		SUBSET
+# 		#RESOLUTION
+# 	]
+# 	cachefile = f'{model["cache_dir"]}/{"_".join(e)}'
+# 	# try:
+# 	#     return data_cache[cachefile]
+# 	# except:
+# 	#     pass
+# 	try:
+# 		return loadpickle(cachefile)
+# 	except:
+# 		pass
+# 	# We have to read two files, control (cf) and perturbed (pf):
+# 	ensemble_ds = read_hindcast_file(refdate=refdate, suffix='pf')
+# 	control_ds = read_hindcast_file(refdate=refdate, suffix='cf')
+# 	ensemble_precip = ensemble_ds[model["variable_name"]]
+# 	control_precip = control_ds[model["variable_name"]]
+# 	control_precip_expanded = control_precip.expand_dims(dim='number', axis=0)
+# 	combined_precip = xr.concat([control_precip_expanded, ensemble_precip], dim='number')
+# 	init_times = control_ds['time'][:].values
+# 	result = {}
+# 	for j,init_time in enumerate(init_times):
+# 		first = combined_precip.isel(time=j)
+# 		mdata = np.empty_like(first)
+# 		#Context().debug(j,init_time)
+# 		mdata[:, 0, :, :] = first.isel(step=0)
+# 		for step in range(1, first.shape[1]):
+# 			mdata[:, step, :, :] = first.isel(step=step) - first.isel(step=step-1)
+# 		# The new array mdata now has 24-hour accumulated values for the first initial time
+# 		# with the shape (number=10, step=30, latitude=100, longitude=61)
+# 		# eradata = []
+# 		valid_times = []
+# 		for i, t in enumerate(init_time + control_ds['step'][:].values):
+# 			dt = pd.Timestamp(t)
+# 			valid_times.append(dt)
+# 		result[pd.Timestamp(init_time)] = {
+# 			# 'eradata': eradata,
+# 			'model_data': model["precip_mult"]*mdata,
+# 			'valid_times': valid_times
+# 		}
+# 	return result
 
 def read_nc_file(filepath, variable = 'tp'):
 	"""
@@ -998,9 +1183,24 @@ def make_forecast_for_refdate(forecast_options, **kw):
 	
 	lead_time_day0 = forecast_options['lead_time_day0']
 
-	model = kw['model']
+	# Allow strings here
+	try:
+		model = kw['model']
+	except:
+		model = create_model(kw['model_name'])
+		kw['model'] = model
+	try:
+		obs_source = kw['obs_source']
+	except:
+		obs_source = create_obs_source(kw['obs_source_name'])
+		kw['obs_source'] = obs_source
+
 	refdate = kw['refdate']
-	obs_source = kw['obs_source']
+
+	try:
+		fig_dir = kw['fig_dir']
+	except:
+		fig_dir = FIGDIR
 
 	# See if we're testing  
 	testing = get_prop('testing', False, **kw)
@@ -1043,7 +1243,7 @@ def make_forecast_for_refdate(forecast_options, **kw):
 	
 	# Now get all the initial times for that closest refdate
 	init_times = get_init_times_for_refdate(model=model, refdate=closest_refdate)
-	debug('Initial times for closest refdate:', init_times)
+	#debug('Initial times for closest refdate:', init_times)
 
 	# For each of these initial times, collect hindcast data
 	# This returns a dictionary with key init_time, and for each init_time another
@@ -1208,8 +1408,21 @@ def make_forecast_for_refdate(forecast_options, **kw):
 							extend=extend
 						)
 						cbar_ax.tick_params(labelsize=fs-1)
-						filename = f"{key}_{threshold}_{i}_{dregion}"
-						savefig(filename, base_path = FIGDIR)
+
+						if forecast_type == 'dry_spells':
+							e = [
+								'fcst',
+								refdate.strftime('%Y-%m-%d'),
+								f"{lead_time_day0}-{lead_time_day1}",
+								f"{threshold}",
+								f"{hits_kwargs['consecutive_days']}",
+								key,
+								region_to_country_code(dregion)
+							]
+							filename = f'_'.join(e)
+						else:
+							filename = f"{key}_{threshold}_{i}_{dregion}"
+						savefig(filename, base_path = fig_dir)
 
 def test():
 
@@ -1240,12 +1453,21 @@ def test():
 	# Dry spell forecast
 	forecast_options_dry = {
 		'forecast_type': 'dry_spells',
+		'no_rain_thresholds': [1,2,5],
+		'consecutive_days': [5,7,9],
+		'threshold_type': ['absolute'],
+		'lead_time_day0': 2,
+		'forecast_periods_days': [14,21],
+		'regions': ['EA','ET','MW','MG']
+	}
+	forecast_options_dry_single = {
+		'forecast_type': 'dry_spells',
 		'no_rain_thresholds': [1],
-		'consecutive_days': [7],
+		'consecutive_days': [5],
 		'threshold_type': ['absolute'],
 		'lead_time_day0': 2,
 		'forecast_periods_days': [14],
-		'regions': ['EA']
+		'regions': ['MW']
 	}
 		
 	# Dry spell forecast
@@ -1270,16 +1492,43 @@ def test():
 	# 	'regions': ['EA']
 	# }
 
-	forecast_options = forecast_options_dry_percentile
+	#forecast_options = forecast_options_dry_percentile
+	forecast_options = forecast_options_dry_single
 
 	make_forecast_for_refdate(
 		forecast_options,
-		model = ecmf_native_new(),
-		#refdate = (datetime.today() - timedelta(days=2)).date(),
-		refdate = datetime(2026,1,21).date(),
-		obs_source = era5_new()
+		model_name = 'ecmwf',
+		refdate = (datetime.today() - timedelta(days=1)).date(),
+		#refdate = datetime(2026,2,17).date(),
+		obs_source_name = 'era5'
 	)
 
+def test_hindcasts():
+	# res = collect_hindcast_data_for_refdate(
+	# 	model = ecmf_native_new(),
+	# 	refdate = datetime(2026,2,15).date()
+	# )
+	# print('-------- OLD')
+	# for k, v in res.items():
+	# 	print(v['valid_times'])
+	# 	print(v['model_data'].shape)
+	# 	break
+	# collect_forecast_data_for_refdate(
+	# 	model = ecmf_native_new(),
+	# 	refdate = datetime(2026,2,17).date()
+	# )
+	res = collect_hindcast_data_for_refdate(
+		model = ecmf_native_new(),
+		refdate = datetime(2026,2,23).date()
+	)
+	print('-------- NEW')
+	for k, v in res.items():
+		print(v['valid_times'])
+		print(v['model_data'].shape)
+		break
+
 if __name__ == "__main__":
+	#test_hindcasts()
+	#test_hindcasts()
 	test()
 	#plt.show()

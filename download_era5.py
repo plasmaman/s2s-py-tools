@@ -4,8 +4,8 @@ from settings import *
 from datetime import datetime, date
 
 client = None
-months = [3]
-years = [2021]
+months = [2]
+years = range(2006,2026)
 dataset = "reanalysis-era5-single-levels"
 subset = SUBSET
 
