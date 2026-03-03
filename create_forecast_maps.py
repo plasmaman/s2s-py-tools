@@ -434,6 +434,7 @@ def load_hindcast_cf_pf(pattern, variable, precip_mult=1.0):
 	return result
 
 def collect_hindcast_data_for_refdate(**kw):
+
 	model = kw['model']
 	refdate = kw['refdate']
 
@@ -460,36 +461,39 @@ def collect_hindcast_data_for_refdate(**kw):
 		return result
 
 	# --- Old-style: separate _cf_ / _pf_ files ---
-	try:
-		cf_file = read_hindcast_file(refdate=refdate, suffix='cf', raise_on_missing=False)
-	except:
-		cf_file = None
-	try:
-		pf_file = read_hindcast_file(refdate=refdate, suffix='pf', raise_on_missing=False)
-	except:
-		pf_file = None
-
-	if cf_file is not None and pf_file is not None:
-		ensemble_ds = read_hindcast_file(refdate=refdate, suffix='pf')
-		control_ds  = read_hindcast_file(refdate=refdate, suffix='cf')
-		ensemble_precip = ensemble_ds[model["variable_name"]]
-		control_precip  = control_ds[model["variable_name"]]
-		control_precip_expanded = control_precip.expand_dims(dim='number', axis=0)
-		combined_precip = xr.concat([control_precip_expanded, ensemble_precip], dim='number')
-		init_times = control_ds['time'][:].values
-		result = {}
-		for j, init_time in enumerate(init_times):
-			first = combined_precip.isel(time=j)
-			mdata = np.empty_like(first)
-			mdata[:, 0, :, :] = first.isel(step=0)
-			for step in range(1, first.shape[1]):
-					mdata[:, step, :, :] = first.isel(step=step) - first.isel(step=step-1)
-			valid_times = [pd.Timestamp(t) for t in init_time + control_ds['step'][:].values]
-			result[pd.Timestamp(init_time)] = {
-					'model_data': model["precip_mult"] * mdata,
-					'valid_times': valid_times,
-			}
-		return result
+	# Allow hindcasts from last year
+	for year_subtract in [0,1]:
+		for delta in [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+			dt = refdate + timedelta(days=delta-year_subtract*365)
+			try:
+				cf_file = read_hindcast_file(refdate=dt, suffix='cf', raise_on_missing=False)
+			except:
+				cf_file = None
+			try:
+				pf_file = read_hindcast_file(refdate=dt, suffix='pf', raise_on_missing=False)
+			except:
+				pf_file = None
+			if cf_file is not None and pf_file is not None:
+				ensemble_ds = read_hindcast_file(refdate=dt, suffix='pf')
+				control_ds  = read_hindcast_file(refdate=dt, suffix='cf')
+				ensemble_precip = ensemble_ds[model["variable_name"]]
+				control_precip  = control_ds[model["variable_name"]]
+				control_precip_expanded = control_precip.expand_dims(dim='number', axis=0)
+				combined_precip = xr.concat([control_precip_expanded, ensemble_precip], dim='number')
+				init_times = control_ds['time'][:].values
+				result = {}
+				for j, init_time in enumerate(init_times):
+					first = combined_precip.isel(time=j)
+					mdata = np.empty_like(first)
+					mdata[:, 0, :, :] = first.isel(step=0)
+					for step in range(1, first.shape[1]):
+							mdata[:, step, :, :] = first.isel(step=step) - first.isel(step=step-1)
+					valid_times = [pd.Timestamp(t) for t in init_time + control_ds['step'][:].values]
+					result[pd.Timestamp(init_time)] = {
+							'model_data': model["precip_mult"] * mdata,
+							'valid_times': valid_times,
+					}
+				return result
 
 	raise RuntimeError(f"No hindcast files found for refdate {refdate} within ±5 days")
 
@@ -829,7 +833,7 @@ def get_daily_precip(year, month, day, **kw):
 	raise ValueError("Unknown obs_source:", obs_source)
 
 
-def compute_thresholds(refdate, all_data, **kw):
+def compute_thresholds(all_data, **kw):
 	mask = get_prop('mask', False, **kw)
 	thr_window = BIAS_CORRECTION_WINDOW_DAYS
 	# This must be defined, cannot use a default
@@ -854,7 +858,7 @@ def compute_thresholds(refdate, all_data, **kw):
 	# 	thr = loadpickle(cachefile)
 	# except:
 		# # Now we compute the thresholds for all the validtimes
-		debug('Computing thresholds:', refdate)
+		debug('Computing thresholds...')
 		# Make a new data array by combining all initial times for this refdate:
 		data = {'model': np.array([all_data[it]['model_data'] for it in init_times])}
 		# We now collect the data from the obs source:
@@ -910,10 +914,10 @@ def compute_thresholds(refdate, all_data, **kw):
 		#savepickle(cachefile, thr)
 	return thr
 
-def compute_percentile_thresholds(refdate, all_data, key, percentile=None, **kw):
+def compute_percentile_thresholds(all_data, key, percentile=None, **kw):
 	window_days = PERCENTILE_WINDOW_DAYS[key]
 	init_times = sorted(all_data.keys())
-	debug(f'Computing percentile-based thresholds for {key}:', refdate)
+	debug(f'Computing percentile-based thresholds for {key}...')
 	# Make a new data array by combining all initial times for this refdate:
 	key2 = ('obs_data' if key=='clim' else 'model_data')
 	# Insert empty dimension to make this compatible
@@ -1202,9 +1206,52 @@ def make_forecast_for_refdate(forecast_options, **kw):
 	except:
 		fig_dir = FIGDIR
 
+	# Make a list of regions for which we show maps:
+	display_regions = []
+	for region in forecast_options['regions']:
+		display_regions.append(country_code_to_region(region))
+
 	# See if we're testing  
 	testing = get_prop('testing', False, **kw)
 	force = get_prop('force', False, **kw)
+
+	# Check if all the files already exist
+	def all_files_exist():
+		for threshold in thresholds:
+			for forecast_period in forecast_options['forecast_periods_days']:
+				lead_time_day1 = lead_time_day0 + forecast_period - 1
+				# Loop over all combinations of auxiliary parameters
+				for aux_combo in itertools.product(*aux_param_values):
+					# Create dict of auxiliary params for this iteration
+					aux_dict = dict(zip(aux_param_names, aux_combo))
+					# Get the kwargs for define_hits using the spec's function
+					hits_kwargs = spec['hits_kwargs'](threshold, aux_dict)
+					for key in ['model','clim','diff']:
+						for dregion in display_regions:
+							if forecast_type == 'dry_spells':
+								e = [
+									'fcst',
+									refdate.strftime('%Y-%m-%d'),
+									f"{lead_time_day0}-{lead_time_day1}",
+									f"{threshold}",
+									f"{hits_kwargs['consecutive_days']}",
+									key,
+									region_to_country_code(dregion)
+								]
+								filename = f'_'.join(e)
+							else:
+								filename = f"{key}_{threshold}_{i}_{dregion}"
+							filename = f'{fig_dir}/{filename}.png'
+							if not os.path.exists(filename):
+								return False
+							#print(filename, os.path.exists(filename))
+		return True
+
+	if not force and all_files_exist():
+		debug('All forecast files exist for refdate =', refdate)
+		return
+		
+	debug('Creating forecast files for refdate =', refdate)
 
 	# Set some constants:
 	ms = 2.5
@@ -1230,39 +1277,41 @@ def make_forecast_for_refdate(forecast_options, **kw):
 	cbar_bottom_inches = margin_bottom_inches - cbar_height_inches - cbar_padding_inches # space from bottom of figure
 	cbar_right_inches = axes_width_inches + margin_left_inches + cbar_padding_inches
 	cbar_width_inches = 0.1
-
-
-	# Make a list of regions for which we show maps:
-	display_regions = []
-	for region in forecast_options['regions']:
-		display_regions.append(country_code_to_region(region))
-
-	# Get the forecast data for the refdate (initial date):
-	f = collect_forecast_data_for_refdate(model=model, refdate=refdate)
-	# debug("model_data shape:", f["model_data"].shape)
-	# debug("first valid time:", f["valid_times"][0], "last:", f["valid_times"][-1])
 	
 	g = get_grid()
 	# debug("grid shape:", g['lon'].shape)
 
-	# Get the closest hindcast date for calibration
-	closest_refdate = find_closest_hindcast_refdate(model=model, refdate=refdate)
-	if closest_refdate is None:
-		raise RuntimeError(f"No hindcast refdate found within search window for refdate={refdate}")
-	debug('refdate, closest_refdate:', refdate, closest_refdate)
+	# # Get the closest hindcast date for calibration
+	# closest_refdate = find_closest_hindcast_refdate(model=model, refdate=refdate)
+	# if closest_refdate is None:
+	# 	raise RuntimeError(f"No hindcast refdate found within search window for refdate={refdate}")
+	# debug('refdate, closest_refdate:', refdate, closest_refdate)
 	
-	# Now get all the initial times for that closest refdate
-	init_times = get_init_times_for_refdate(model=model, refdate=closest_refdate)
-	#debug('Initial times for closest refdate:', init_times)
+	# # Now get all the initial times for that closest refdate
+	# init_times = get_init_times_for_refdate(model=model, refdate=closest_refdate)
+	# debug('Assumed initial times for closest refdate:', init_times)
 
 	# For each of these initial times, collect hindcast data
 	# This returns a dictionary with key init_time, and for each init_time another
 	# dictionary with keys "model_data" and "valid_times"
-	all_data = collect_hindcast_data_for_refdate(model=model, refdate=closest_refdate)
+	#all_data = collect_hindcast_data_for_refdate(model=model, refdate=closest_refdate)
+
+	# This can fail with a RuntimeError:
+	all_data = collect_hindcast_data_for_refdate(model=model, refdate=refdate)
 	# Print these if you want:
-	if False:
-		for key,val in h.items():
-			debug(key, val['model_data'].shape, val['valid_times'])
+	# for init_time,val in all_data.items():
+	# 	debug('Hindcast init_time collected:', init_time, val['model_data'].shape)
+
+	# Get the forecast data for the refdate (initial date):
+	fcst_data = collect_forecast_data_for_refdate(model=model, refdate=refdate)
+	#debug("model_data shape:", fcst_data["model_data"].shape)
+	#debug("first valid time:", fcst_data["valid_times"][0], "last:", fcst_data["valid_times"][-1])
+
+	# An important thing to note here is that the valid times for the forecast
+	# do not necessarily match the valid times in the hindcasts.
+	# This is because the hindcasts are not produced every day.
+	# We therefore use the hindcasts' initial data as reference and call these init_times
+	init_times = sorted(all_data.keys())
 
 	# Now we collect "observational data" for these init_times
 	# In our case this is ERA5 data
@@ -1272,17 +1321,18 @@ def make_forecast_for_refdate(forecast_options, **kw):
 		for vt in all_data[it]['valid_times']:
 			obs_data.append(get_daily_precip(vt.year, vt.month, vt.day, obs_source=obs_source))
 			#debug(vt, obs_data[-1].shape)
-			#sys.exit()
 		all_data[it]['obs_data'] = obs_data
 
 	# Main processing loop - completely generic
 	for threshold in thresholds:
-
 		for forecast_period in forecast_options['forecast_periods_days']:
 			lead_time_day1 = lead_time_day0 + forecast_period - 1
 			# Find the day index for this subselection:
 			it = init_times[0]
 			valid_times = all_data[it]['valid_times']
+			# Crucial: We don't care if the valid time matches
+			# We only care that the hindcast is close in time
+			# So we compute the idx position index for each valid time
 			idx = []
 			for i,vt in enumerate(valid_times):
 				td = vt - it
@@ -1292,7 +1342,7 @@ def make_forecast_for_refdate(forecast_options, **kw):
 					continue
 				idx.append(i)
 			#debug(lead_time_day0, lead_time_day1, idx, len(idx))
-			fcst_data = f['model_data'][:,idx,:,:]
+			f = fcst_data['model_data'][:,idx,:,:]
 			all_obsdata = np.array([
 				[all_data[it]['obs_data'][i] for i in idx] 
 				for it in init_times
@@ -1318,14 +1368,13 @@ def make_forecast_for_refdate(forecast_options, **kw):
 					# We must map the threshold in the obs_data to a corresponding threshold in the model_data
 					# thr contains the tresholds per day and grid point : (day, lat, lon)
 					thr = compute_thresholds(
-						closest_refdate, 
 						all_data,
 						precip_mm=threshold,
 						obs_source=kw.get('obs_source')
 					)
 					# Compute hits
 					hits = {
-						'model': define_hits(fcst_data, thr[idx, :, :], **hits_kwargs),
+						'model': define_hits(f, thr[idx, :, :], **hits_kwargs),
 						'clim': define_hits(all_obsdata, threshold, **hits_kwargs)
 					}
 				elif threshold_type == 'percentile':
@@ -1334,17 +1383,15 @@ def make_forecast_for_refdate(forecast_options, **kw):
 					#h = define_hits_prob(forecast_period, threshold, **hits_kwargs)
 					#print(h)
 					thr = compute_percentile_thresholds(
-						closest_refdate, 
 						all_data,
 						'model',
 						percentile=threshold
 					)
 					# Compute hits
 					hits = {
-						'model': define_hits(fcst_data, thr[idx, :, :], **hits_kwargs),
+						'model': define_hits(f, thr[idx, :, :], **hits_kwargs),
 					}
 					thr = compute_percentile_thresholds(
-						closest_refdate, 
 						all_data,
 						'clim',
 						percentile=threshold,
@@ -1447,6 +1494,7 @@ def make_forecast_for_refdate(forecast_options, **kw):
 						else:
 							filename = f"{key}_{threshold}_{i}_{dregion}"
 						savefig(filename, base_path = fig_dir)
+						plt.close()
 
 def test():
 
