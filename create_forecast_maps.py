@@ -1296,16 +1296,16 @@ def make_forecast_for_refdate(forecast_options, **kw):
 	# dictionary with keys "model_data" and "valid_times"
 	#all_data = collect_hindcast_data_for_refdate(model=model, refdate=closest_refdate)
 
+	# Get the forecast data for the refdate (initial date):
+	fcst_data = collect_forecast_data_for_refdate(model=model, refdate=refdate)
+	#debug("model_data shape:", fcst_data["model_data"].shape)
+	#debug("first valid time:", fcst_data["valid_times"][0], "last:", fcst_data["valid_times"][-1])
+
 	# This can fail with a RuntimeError:
 	all_data = collect_hindcast_data_for_refdate(model=model, refdate=refdate)
 	# Print these if you want:
 	# for init_time,val in all_data.items():
 	# 	debug('Hindcast init_time collected:', init_time, val['model_data'].shape)
-
-	# Get the forecast data for the refdate (initial date):
-	fcst_data = collect_forecast_data_for_refdate(model=model, refdate=refdate)
-	#debug("model_data shape:", fcst_data["model_data"].shape)
-	#debug("first valid time:", fcst_data["valid_times"][0], "last:", fcst_data["valid_times"][-1])
 
 	# An important thing to note here is that the valid times for the forecast
 	# do not necessarily match the valid times in the hindcasts.
