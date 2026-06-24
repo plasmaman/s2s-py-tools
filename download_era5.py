@@ -4,7 +4,7 @@ from settings import *
 from datetime import datetime, date
 
 client = None
-months = [2]
+months = [9,10,11,12]
 years = range(2006,2026)
 dataset = "reanalysis-era5-single-levels"
 subset = SUBSET
@@ -33,7 +33,7 @@ if 1:
 					client = cdsapi.Client()
 				client.retrieve(dataset, d, filename)
 
-if 1:
+if 0:
 	d = {
 		"download_format": "unarchived",
 		'data_format': 'netcdf',

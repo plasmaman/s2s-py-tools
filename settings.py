@@ -2,9 +2,10 @@
 #SUBSET = 'malawi'
 SUBSET = 'native'
 HOMEDIR = "/nird/home/kolstad"
-DATADIR = "/nird/datapeak/NS9873K/kolstad"
-ECMF_FORECAST_FILE_WILDCARD = f"/nird/datalake/NS9853K/kolstad/ecwmf/A1F%m%d*1"
-ECMF_HINDCAST_FILE_WILDCARD = f"/nird/datalake/NS9853K/kolstad/ecwmf/A1H%m%d*1"
+#DATADIR = "/nird/datapeak/NS9873K/kolstad"
+DATADIR = "/nird/datalake/NS9853K/kolstad"
+ECMF_FORECAST_FILE_WILDCARD = f"{DATADIR}/ecwmf/A1F%m%d*1"
+ECMF_HINDCAST_FILE_WILDCARD = f"{DATADIR}/ecwmf/A1H%m%d*1"
 #ECMF_FORECAST_FILE_WILDCARD = f"/nird/datalake/NS9853K/users/rondro/DATA/IFS_example/ECMWFupload/mal_a1_ifs-subs_od_eefo_*_%Y%m%d*"
 CACHEROOT = f"{DATADIR}/cache/python"
 CACHEDIR = f"{CACHEROOT}/africa/native"
