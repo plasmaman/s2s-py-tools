@@ -1,4 +1,7 @@
 #from pyexpat import model
+from email.policy import default
+from unittest.mock import DEFAULT
+
 from settings import *
 import os, sys
 import numpy as np
@@ -185,13 +188,15 @@ def get_data_cache_key(obs_source):
 	#return f"{obs_source['model_name']}_{obs_source['resolution']}"
 	return f"{obs_source['model_name']}_{obs_source['subset']}"
 
-def era5_new(*, 
+#def era5_new(*, 
+def era5_new( 
 	base_dir=ERA5_DIR, 
 	variable_name="tp", 
 	cache_dir=CACHEDIR, 
-	subset = SUBSET,
+	subset = DEFAULT_SUBSET,
 	#resolution = RESOLUTION,
-	precip_mult = 1000.
+	precip_mult = 1000.,
+	**kw
 ):
 	dic = {
 		"model_name": "era5",
@@ -199,6 +204,8 @@ def era5_new(*,
 		"variable_name": variable_name,
 		"cache_dir": cache_dir,
 		"precip_mult": precip_mult,
+		"file_wildcard": '%s/era5_tp_%Y_%m_%s.nc',
+		#"file_wildcard": '{ERA5_DIR}/era5_tp_%Y_%m_{subset}.nc',
 		"subset": subset
 		#"resolution": resolution
 		#"data_cache": {},
@@ -206,39 +213,59 @@ def era5_new(*,
 	#global_data_cache[dic] = {}
 	return dic
 
-def create_model(model_name, **kw):
-	if model_name in ('ecmwf', 'ecmwf',):
-		return ecmf_native_new(**kw)
-	raise RuntimeError('Invalid model name:', model_name)
+#def create_model(model_name, **kw):
+	#if kw['model_name'] in ('ecmwf', 'ecmwf',):
+	#	return ecmf_native_new(**kw)
+	#return model_dict(**kw)
+	#raise RuntimeError('Invalid model name:', kw['model_name'])
 
-def create_obs_source(obs_source_name, **kw):
-	if obs_source_name in ('era5',):
-		return era5_new(**kw)
-	raise RuntimeError('Invalid obs source name:', obs_source_name)
-
-def ecmf_native_new(*, 
-	#fcst_dir=ECMF_NATIVE_ROOT, 
-	hcst_dir=HINDCAST_DIR, 
-	variable_name="tp", 
-	cache_dir=CACHEDIR, 
-	first_lead_time=24, 
-	last_lead_time=720, 
-	subset = SUBSET,
-	#resolution = RESOLUTION,
-	precip_mult = 1000.
-):
+#def create_obs_source(obs_source_name, **kw):
+def create_obs_source(**kw):
+	#if kw['obs_source_name'] in ('era5',):
+	#	return era5_new(**kw)
+	#raise RuntimeError('Invalid obs source name:', kw['obs_source_name'])
 	dic = {
-		"model_name": "ecmf",
-		#"fcst_dir": fcst_dir,       
-		"hcst_dir": hcst_dir,       
-		"variable_name": variable_name,
-		"first_lead_time": int(first_lead_time),
-		"last_lead_time": int(last_lead_time),
-		"cache_dir": cache_dir,
-		"precip_mult": precip_mult,
-		"subset": subset
-		#"resolution": resolution
+		'precip_mult': 1000.,
+		#'base_dir': ERA5_DIR, 
+		'cache_dir': CACHEDIR, 
+		'variable_name': 'tp',
+		'obs_source_name': 'era5',
+		'subset': 'new'
 	}
+	dic['file_wildcard'] = f'{kw['era5_dir']}/era5_tp_%Y_%m_{dic['subset']}.nc'
+	for k,v in kw.items():
+		dic[k] = v
+	return dic
+
+#def ecmf_native_new(*, 
+def create_model(**kw):
+	#fcst_dir=ECMF_NATIVE_ROOT, 
+	#hcst_dir=HINDCAST_DIR, 
+	#subset = DEFAULT_SUBSET,
+	#resolution = RESOLUTION,
+	dic = {
+		'precip_mult': 1000.,
+		'first_lead_time': 24, 
+		'last_lead_time': 720, 
+		'cache_dir': CACHEDIR, 
+		'variable_name': 'tp',
+		'model_name': 'ecmwf',
+		'subset': 'new'
+	}
+	for k,v in kw.items():
+		dic[k] = v
+	# dic = {
+	# 	"model_name": "ecmf",
+	# 	#"fcst_dir": fcst_dir,       
+	# 	"hcst_dir": hcst_dir,       
+	# 	"variable_name": variable_name,
+	# 	"first_lead_time": int(first_lead_time),
+	# 	"last_lead_time": int(last_lead_time),
+	# 	"cache_dir": cache_dir,
+	# 	"precip_mult": precip_mult,
+	# 	"subset": subset
+	# 	#"resolution": resolution
+	# }
 	#global_data_cache[dic] = {}
 	return dic
 
@@ -324,6 +351,7 @@ def load_cf_pf(pattern):
 				raise RuntimeError(f"No {key} files found....")
 			parts[key] = []
 			for f in files[key]:
+				#print(f)
 				ds = xr.open_dataset(f, engine="cfgrib")
 				ds = ensure_valid_time(ds)
 				parts[key].append(ds)
@@ -433,6 +461,90 @@ def load_hindcast_cf_pf(pattern, variable, precip_mult=1.0):
 
 	return result
 
+def load_hindcast_cf_pf_separate(pattern, variable, precip_mult=1.0):
+	"""
+	Load hindcast cf and pf from separate GRIB files.
+	Each file contains 20 hindcast years for one forecast step.
+	Returns same structure as load_hindcast_cf_pf().
+	"""
+	concat_kw = dict(coords="minimal", data_vars="minimal",
+					 compat="override", join="override",
+					 combine_attrs="override")
+
+	datasets = {}
+
+	for dtype in ['cf', 'pf']:
+
+		# Allow pattern to contain either * or _cf_/_pf_
+		if '_cf_' in pattern or '_pf_' in pattern:
+			dtype_pattern = pattern.replace('_cf_', f'_{dtype}_').replace(
+				'_pf_', f'_{dtype}_')
+		else:
+			dtype_pattern = pattern
+
+		files = sorted(f for f in glob(dtype_pattern)
+					   if '.idx' not in f and
+					   f'_{dtype}_' in os.path.basename(f))
+
+		if not files:
+			raise FileNotFoundError(f"No {dtype} files found: {dtype_pattern}")
+
+		parts = []
+		for f in files:
+			ds = xr.open_dataset(f, engine="cfgrib",
+								 backend_kwargs={"indexpath": ""})
+			if 'step' not in ds.dims:
+				ds = ds.expand_dims("step")
+			parts.append(ds)
+
+		datasets[dtype] = xr.concat(parts, dim="step", **concat_kw)
+
+	# Check that cf and pf contain identical steps
+	if not np.array_equal(datasets['cf'].step.values,
+						  datasets['pf'].step.values):
+		raise ValueError("Mismatched cf/pf forecast steps")
+
+	# Control member becomes number=0
+	ds_cf = datasets['cf']
+	if 'number' in ds_cf.dims:
+		ds_cf = ds_cf.squeeze("number", drop=True)
+	ds_cf = ds_cf.expand_dims(number=[0])
+
+	ds_merged = xr.concat(
+		[ds_cf, datasets['pf']],
+		dim="number",
+		**concat_kw,
+	).sortby("step")
+
+	# Build result dictionary
+	result = {}
+	hdates = ds_merged["time"].values
+	steps = ds_merged["step"].values
+
+	# Remove step=0 if present
+	keep = np.where(steps > np.timedelta64(0, "ns"))[0]
+
+	for j, hdate in enumerate(hdates):
+		da = ds_merged[variable].isel(time=j)
+		data = da.isel(step=keep).transpose(
+			"number", "step", "latitude", "longitude"
+		).values
+
+		# De-accumulate
+		mdata = np.empty_like(data)
+		mdata[:, 0, :, :] = data[:, 0, :, :]
+		mdata[:, 1:, :, :] = data[:, 1:, :, :] - data[:, :-1, :, :]
+
+		base = pd.Timestamp(hdate)
+		valid_times = [base + pd.Timedelta(s) for s in steps[keep]]
+
+		result[base] = {
+			'model_data': precip_mult * mdata,
+			'valid_times': valid_times,
+		}
+
+	return result
+
 def collect_hindcast_data_for_refdate(**kw):
 
 	model = kw['model']
@@ -447,17 +559,38 @@ def collect_hindcast_data_for_refdate(**kw):
 
 	# --- New-style: single files per step containing both cf and pf ---
 	result = None
-	for delta in [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+	for delta in [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -7, 7]:
 		dt = refdate + timedelta(days=delta)
-		pattern = dt.strftime(ECMF_HINDCAST_FILE_WILDCARD)
+		try:
+			wildcard = model['hcst_wildcard']
+		except:
+			wildcard = ECMF_HINDCAST_FILE_WILDCARD_OLD
+		pattern = dt.strftime(wildcard)
 		file_list = [f for f in glob(pattern) if '.idx' not in f]
 		if not file_list:
 				continue
-		result = load_hindcast_cf_pf(
+		#print(dt, file_list)
+		#sys.exit()
+
+		# Try new format
+		try:
+			result = load_hindcast_cf_pf_separate(
 				pattern=pattern,
 				variable=model["variable_name"],
 				precip_mult=model["precip_mult"],
+			)
+			print("Loaded new separate cf/pf format")
+			return result
+		except FileNotFoundError:
+			pass
+
+		# Fall back to old format
+		result = load_hindcast_cf_pf(
+			pattern=pattern,
+			variable=model["variable_name"],
+			precip_mult=model["precip_mult"],
 		)
+		print("Loaded old combined cf/pf format")
 		return result
 
 	# --- Old-style: separate _cf_ / _pf_ files ---
@@ -547,12 +680,18 @@ def collect_forecast_data_for_refdate(**kw):
 	
 	init_tag = refdate.strftime("%m%d")
 	#pattern = f'{model["fcst_dir"]}/{ECMF_NATIVE_FILE_PREFIX}*{init_tag}*'
-	pattern = refdate.strftime(ECMF_FORECAST_FILE_WILDCARD)
-	#print(pattern)
+	try:
+		wildcard = model['fcst_wildcard']
+	except:
+		wildcard = ECMF_FORECAST_FILE_WILDCARD_OLD
+	pattern = refdate.strftime(wildcard)
+	#print(model, pattern)
 	#sys.exit()
 
 	# This does a lot of things with the files
 	ds_merged = load_cf_pf(pattern)
+	#print(ds_merged)
+	#sys.exit()
 
 	# Check that we have the variable
 	var = model["variable_name"]
@@ -583,7 +722,7 @@ def collect_forecast_data_for_refdate(**kw):
 	# optional: savepickle(cachefile, result)
 	return result
 
-def get_grid(cache_dir=CACHEDIR):
+def get_grid(cache_dir=CACHEDIR, subset=None, lsm_file=None, **kw):
 	"""
 	Procedural replacement for Context().get_grid()
 
@@ -596,7 +735,7 @@ def get_grid(cache_dir=CACHEDIR):
 	if _GRID_CACHE is not None:
 		return _GRID_CACHE
 	#cachefile = f"{cache_dir}/grid_{RESOLUTION}"
-	cachefile = f"{cache_dir}/grid_{SUBSET}"
+	cachefile = f"{cache_dir}/grid_{subset}"
 	try:
 		g = loadpickle(cachefile)
 		_GRID_CACHE = g
@@ -604,8 +743,9 @@ def get_grid(cache_dir=CACHEDIR):
 	except Exception:
 		pass
 	# Build grid from the ERA5 LSM file
-	file_path = f"{ERA5_LSM_FILE}"
-	ds = nc.Dataset(file_path)
+	#file_path = f"{ERA5_LSM_FILE}"
+	#ds = nc.Dataset(file_path)
+	ds = nc.Dataset(lsm_file)
 	lon_1d = ds["longitude"][:]
 	lat_1d = ds["latitude"][:]
 	try:
@@ -789,14 +929,15 @@ def process_monthly_files_era5(year, month, **kw):
 	obs_source = kw['obs_source']
 	#resolution = obs_source['resolution']
 	subset = obs_source['subset']
+	wc = obs_source['file_wildcard']
 	dt = datetime(year=year, month=month, day=1).date()
-	file_current = dt.strftime(ERA5_FILE_WILDCARD)
+	file_current = dt.strftime(wc)
 	#file_prefix = f"{obs_source['base_dir']}/{obs_source['model_name']}_{EXPNAME}_{obs_source['variable_name']}"
 	#file_current = f"{file_prefix}_{year}_{month:02d}_{resolution}.nc"
 	next_month = (1 if month==12 else month+1)
 	next_year = (year+1 if month==12 else year)
 	dt = datetime(year=next_year, month=next_month, day=1).date()
-	file_next = dt.strftime(ERA5_FILE_WILDCARD)
+	file_next = dt.strftime(wc)
 	#file_next = f"{file_prefix}_{next_year}_{next_month:02d}_{resolution}.nc"
 	# Read the current month's data
 	tp_current = read_nc_file(file_current)
@@ -828,7 +969,7 @@ def get_daily_precip_era5(year, month, day, **kw):
 
 def get_daily_precip(year, month, day, **kw):
 	obs_source = kw['obs_source']
-	if obs_source['model_name'] == 'era5':
+	if obs_source['obs_source_name'] == 'era5':
 		return get_daily_precip_era5(year, month, day, **kw)
 	raise ValueError("Unknown obs_source:", obs_source)
 
@@ -1191,12 +1332,14 @@ def make_forecast_for_refdate(forecast_options, **kw):
 	try:
 		model = kw['model']
 	except:
-		model = create_model(kw['model_name'])
+		#model = create_model(kw['model_name'])
+		model = create_model(**kw)
 		kw['model'] = model
 	try:
 		obs_source = kw['obs_source']
 	except:
-		obs_source = create_obs_source(kw['obs_source_name'])
+		#obs_source = create_obs_source(kw['obs_source_name'])
+		obs_source = create_obs_source(**kw)
 		kw['obs_source'] = obs_source
 
 	refdate = kw['refdate']
@@ -1249,7 +1392,7 @@ def make_forecast_for_refdate(forecast_options, **kw):
 
 	if not force and all_files_exist():
 		debug('All forecast files exist for refdate =', refdate)
-		return
+		#return
 		
 	debug('Creating forecast files for refdate =', refdate)
 
@@ -1278,7 +1421,7 @@ def make_forecast_for_refdate(forecast_options, **kw):
 	cbar_right_inches = axes_width_inches + margin_left_inches + cbar_padding_inches
 	cbar_width_inches = 0.1
 	
-	g = get_grid()
+	g = get_grid(**kw)
 	# debug("grid shape:", g['lon'].shape)
 
 	# # Get the closest hindcast date for calibration
@@ -1298,6 +1441,7 @@ def make_forecast_for_refdate(forecast_options, **kw):
 
 	# Get the forecast data for the refdate (initial date):
 	fcst_data = collect_forecast_data_for_refdate(model=model, refdate=refdate)
+	debug('Loaded forecast data...')
 	#debug("model_data shape:", fcst_data["model_data"].shape)
 	#debug("first valid time:", fcst_data["valid_times"][0], "last:", fcst_data["valid_times"][-1])
 
@@ -1322,6 +1466,7 @@ def make_forecast_for_refdate(forecast_options, **kw):
 			obs_data.append(get_daily_precip(vt.year, vt.month, vt.day, obs_source=obs_source))
 			#debug(vt, obs_data[-1].shape)
 		all_data[it]['obs_data'] = obs_data
+	debug('Loaded obs data...')
 
 	# Main processing loop - completely generic
 	for threshold in thresholds:
@@ -1341,7 +1486,8 @@ def make_forecast_for_refdate(forecast_options, **kw):
 				if td.days < lead_time_day0:
 					continue
 				idx.append(i)
-			#debug(lead_time_day0, lead_time_day1, idx, len(idx))
+			debug(lead_time_day0, lead_time_day1, idx, len(idx))
+			debug(fcst_data['model_data'].shape)
 			f = fcst_data['model_data'][:,idx,:,:]
 			all_obsdata = np.array([
 				[all_data[it]['obs_data'][i] for i in idx] 

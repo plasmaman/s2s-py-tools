@@ -4,10 +4,11 @@ from settings import *
 from datetime import datetime, date
 
 client = None
-months = [9,10,11,12]
+months = [8,9,10,11,12]
+#months = range(1,9)
 years = range(2006,2026)
 dataset = "reanalysis-era5-single-levels"
-subset = SUBSET
+subset = 'new'
 
 if 1:
 	d = {
